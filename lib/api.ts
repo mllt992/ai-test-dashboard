@@ -77,7 +77,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ projectId, name: title, description }),
     });
-    return { ...toCamelCase(res.item), title: res.item?.name };
+    return { ...(toCamelCase(res.item) as Record<string, unknown>), title: res.item?.name };
   },
 
   updateTestPlan: async (id: string, fields: Record<string, unknown>) => {

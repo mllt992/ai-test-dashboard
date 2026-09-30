@@ -16,6 +16,11 @@ function getAction(request) {
   return url.searchParams.get("action") || "";
 }
 
+function getSubAction(request, prefix) {
+  const action = getAction(request);
+  return action.startsWith(prefix) ? action.slice(prefix.length) : action;
+}
+
 function uuid() {
   return crypto.randomUUID();
 }
@@ -26,7 +31,7 @@ function now() {
 
 // --- Projects ---
 async function handleProjects({ request, supabase }) {
-  const action = getAction(request);
+  const action = getSubAction(request, "project_");
   if (action === "list") {
     const { data, error: err } = await supabase.from("projects").select("*").order("created_at", { ascending: false });
     if (err) return error("database_request_failed", 503);
@@ -68,7 +73,7 @@ async function handleProjects({ request, supabase }) {
 
 // --- Test Plans ---
 async function handleTestPlans({ request, supabase }) {
-  const action = getAction(request);
+  const action = getSubAction(request, "plan_");
   const pid = getParams(request.url).get("projectId");
   if (action === "list") {
     let q = supabase.from("test_plans").select("*").order("created_at", { ascending: false });
@@ -106,7 +111,7 @@ async function handleTestPlans({ request, supabase }) {
 
 // --- Test Cases ---
 async function handleTestCases({ request, supabase }) {
-  const action = getAction(request);
+  const action = getSubAction(request, "case_");
   const pid = getParams(request.url).get("projectId");
   const planId = getParams(request.url).get("planId");
   if (action === "list") {
@@ -151,7 +156,7 @@ async function handleTestCases({ request, supabase }) {
 
 // --- Test Runs ---
 async function handleTestRuns({ request, supabase }) {
-  const action = getAction(request);
+  const action = getSubAction(request, "run_");
   const pid = getParams(request.url).get("projectId");
   if (action === "list") {
     let q = supabase.from("test_runs").select("*").order("created_at", { ascending: false });
@@ -194,7 +199,7 @@ async function handleTestRuns({ request, supabase }) {
 
 // --- Test Results ---
 async function handleTestResults({ request, supabase }) {
-  const action = getAction(request);
+  const action = getSubAction(request, "result_");
   const runId = getParams(request.url).get("runId");
   const caseId = getParams(request.url).get("caseId");
   if (action === "list") {
@@ -230,7 +235,7 @@ async function handleTestResults({ request, supabase }) {
 
 // --- Defects ---
 async function handleDefects({ request, supabase }) {
-  const action = getAction(request);
+  const action = getSubAction(request, "defect_");
   const pid = getParams(request.url).get("projectId");
   if (action === "list") {
     let q = supabase.from("defects").select("*").order("created_at", { ascending: false });
@@ -273,7 +278,7 @@ async function handleDefects({ request, supabase }) {
 
 // --- Solutions ---
 async function handleSolutions({ request, supabase }) {
-  const action = getAction(request);
+  const action = getSubAction(request, "solution_");
   const defectId = getParams(request.url).get("defectId");
   if (action === "list") {
     let q = supabase.from("solutions").select("*").order("created_at", { ascending: true });
@@ -306,7 +311,7 @@ async function handleSolutions({ request, supabase }) {
 
 // --- Retests ---
 async function handleRetests({ request, supabase }) {
-  const action = getAction(request);
+  const action = getSubAction(request, "retest_");
   const defectId = getParams(request.url).get("defectId");
   if (action === "list") {
     let q = supabase.from("retests").select("*").order("created_at", { ascending: true });
@@ -331,7 +336,7 @@ async function handleRetests({ request, supabase }) {
 
 // --- External Tasks ---
 async function handleExternalTasks({ request, supabase }) {
-  const action = getAction(request);
+  const action = getSubAction(request, "task_");
   const pid = getParams(request.url).get("projectId");
   if (action === "list") {
     let q = supabase.from("external_tasks").select("*").order("created_at", { ascending: false });
@@ -364,7 +369,7 @@ async function handleExternalTasks({ request, supabase }) {
 
 // --- Dashboard Stats ---
 async function handleDashboard({ request, supabase }) {
-  const action = getAction(request);
+  const action = getSubAction(request, "dashboard_");
   const pid = getParams(request.url).get("projectId");
   if (action !== "stats") return error("not_found", 404);
 
