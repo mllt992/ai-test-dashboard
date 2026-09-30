@@ -1,5 +1,8 @@
+import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { store } from '@/lib/store';
+import { api } from '@/lib/api';
+import { computeDashboardStats } from '@/lib/stats';
+import type { TestCase, TestResult, Defect } from '@/lib/types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line, Legend } from 'recharts';
 
@@ -7,10 +10,30 @@ const COLORS = ['#22c55e', '#ef4444', '#94a3b8', '#eab308'];
 
 export default function DashboardPage() {
   const { id } = useParams<{ id: string }>();
-  const stats = store.getDashboardStats(id!);
-  const cases = store.getTestCases(id!);
-  const defects = store.getDefects(id!);
-  const results = stats.recentResults;
+  const [cases, setCases] = useState<TestCase[]>([]);
+  const [defects, setDefects] = useState<Defect[]>([]);
+  const [results, setResults] = useState<TestResult[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      const [c, d, r] = await Promise.all([
+        api.getTestCases(id!),
+        api.getDefects(id!),
+        api.getTestResults(),
+      ]);
+      const typedCases = c as unknown as TestCase[];
+      const typedResults = r.filter((x: any) => typedCases.some(tc => tc.id === x.caseId)) as unknown as TestResult[];
+      setCases(typedCases);
+      setDefects(d as unknown as Defect[]);
+      setResults(typedResults);
+      setLoading(false);
+    })().catch(() => setLoading(false));
+  }, [id]);
+
+  if (loading) return <div className="p-8 text-center text-muted-foreground">加载中...</div>;
+
+  const stats = computeDashboardStats(cases, results, defects);
 
   const statusData = [
     { name: '通过', value: stats.passed },
@@ -33,7 +56,7 @@ export default function DashboardPage() {
     const date = new Date();
     date.setDate(date.getDate() - (6 - i));
     const dayStr = date.toISOString().split('T')[0];
-    const dayResults = results.filter(r => r.executedAt.startsWith(dayStr));
+    const dayResults = results.filter(r => (r.executedAt || '').startsWith(dayStr));
     const passed = dayResults.filter(r => r.status === 'passed').length;
     const total = dayResults.length;
     return {
@@ -53,7 +76,7 @@ export default function DashboardPage() {
   const topFailed = cases
     .filter(c => c.status === 'failed')
     .map(c => {
-      const caseResults = store.getTestResultsByCase(c.id);
+      const caseResults = results.filter(r => r.caseId === c.id);
       const failCount = caseResults.filter(r => r.status === 'failed').length;
       return { name: c.name, failCount, total: caseResults.length };
     })

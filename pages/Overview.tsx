@@ -1,21 +1,41 @@
-import { store } from '@/lib/store';
+import { useState, useEffect } from 'react';
+import { api } from '@/lib/api';
+import { computeDashboardStats } from '@/lib/stats';
 import { useAuth, useProject } from '@/store/context';
+import type { TestCase, TestResult, Defect } from '@/lib/types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { Link } from 'react-router-dom';
 import { FolderOpen, FlaskConical, CheckCircle2, XCircle, Bug, Clock } from 'lucide-react';
 
 export default function OverviewPage() {
   const { user } = useAuth();
-  const projects = store.getProjects();
-  const allStats = projects.map(p => ({ project: p, stats: store.getDashboardStats(p.id) }));
+  const { projects } = useProject();
+  const [statsArr, setStatsArr] = useState<{ project: any; stats: ReturnType<typeof computeDashboardStats> }[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const totalCases = allStats.reduce((s, x) => s + x.stats.caseCount, 0);
-  const totalPassed = allStats.reduce((s, x) => s + x.stats.passed, 0);
-  const totalFailed = allStats.reduce((s, x) => s + x.stats.failed, 0);
-  const totalDefects = allStats.reduce((s, x) => s + x.stats.openDefects, 0);
+  useEffect(() => {
+    if (projects.length === 0) { setLoading(false); return; }
+    Promise.all(
+      projects.map(async p => {
+        const [cases, allResults, defects] = await Promise.all([
+          api.getTestCases(p.id),
+          api.getTestResults(),
+          api.getDefects(p.id),
+        ]);
+        const pResults = allResults.filter((r: any) => cases.some((c: any) => c.id === r.caseId));
+        return { project: p, stats: computeDashboardStats(cases as TestCase[], pResults as TestResult[], defects as Defect[]) };
+      })
+    ).then(setStatsArr).finally(() => setLoading(false));
+  }, [projects]);
+
+  if (loading) return <div className="p-8 text-center text-muted-foreground">加载中...</div>;
+
+  const totalCases = statsArr.reduce((s, x) => s + x.stats.caseCount, 0);
+  const totalPassed = statsArr.reduce((s, x) => s + x.stats.passed, 0);
+  const totalFailed = statsArr.reduce((s, x) => s + x.stats.failed, 0);
+  const totalDefects = statsArr.reduce((s, x) => s + x.stats.openDefects, 0);
   const overallRate = totalCases > 0 ? Math.round((totalPassed / (totalPassed + totalFailed)) * 1000) / 10 : 0;
 
   const statCards = [
@@ -57,7 +77,7 @@ export default function OverviewPage() {
             <CardTitle className="text-base font-semibold">项目状态</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2">
-            {allStats.map(({ project: p, stats }) => (
+            {statsArr.map(({ project: p, stats }) => (
               <Link key={p.id} to={`/p/${p.id}/overview`} className="block hover:bg-muted/40 rounded-xl p-4 -mx-3 transition-colors group">
                 <div className="flex items-center justify-between mb-2">
                   <span className="font-semibold text-sm group-hover:text-foreground transition-colors">{p.name}</span>
@@ -73,7 +93,7 @@ export default function OverviewPage() {
                 <Progress value={stats.passRate} className="mt-2.5 h-1.5" />
               </Link>
             ))}
-            {allStats.length === 0 && (
+            {statsArr.length === 0 && (
               <p className="text-sm text-muted-foreground text-center py-6">暂无项目</p>
             )}
           </CardContent>
@@ -84,21 +104,18 @@ export default function OverviewPage() {
             <CardTitle className="text-base font-semibold">最近执行</CardTitle>
           </CardHeader>
           <CardContent className="space-y-1">
-            {allStats.flatMap(x => x.stats.recentResults.map(r => ({ ...r, projectName: x.project.name, projectId: x.project.id })))
-              .sort((a, b) => b.executedAt.localeCompare(a.executedAt))
+            {statsArr.flatMap(x => x.stats.recentResults.map(r => ({ ...r, projectName: x.project.name, projectId: x.project.id })))
+              .sort((a, b) => (b.executedAt || '').localeCompare(a.executedAt || ''))
               .slice(0, 8)
-              .map(r => {
-                const tc = store.getTestCase(r.caseId);
-                return (
-                  <div key={r.id} className="flex items-center gap-3 text-xs py-2 px-2 rounded-lg hover:bg-muted/30 transition-colors">
-                    {r.status === 'passed' ? <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" /> :
-                     r.status === 'failed' ? <XCircle className="h-4 w-4 text-rose-500 shrink-0" /> :
-                     <Clock className="h-4 w-4 text-gray-400 shrink-0" />}
-                    <span className="truncate flex-1 font-medium">{tc?.name ?? '未知用例'}</span>
-                    <span className="text-muted-foreground tabular-nums">{r.durationMs}ms</span>
-                  </div>
-                );
-              })}
+              .map(r => (
+                <div key={r.id} className="flex items-center gap-3 text-xs py-2 px-2 rounded-lg hover:bg-muted/30 transition-colors">
+                  {r.status === 'passed' ? <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" /> :
+                   r.status === 'failed' ? <XCircle className="h-4 w-4 text-rose-500 shrink-0" /> :
+                   <Clock className="h-4 w-4 text-gray-400 shrink-0" />}
+                  <span className="truncate flex-1 font-medium">用例 {r.caseId?.slice(0, 8) ?? '-'}</span>
+                  <span className="text-muted-foreground tabular-nums">{r.durationMs}ms</span>
+                </div>
+              ))}
             {totalCases === 0 && (
               <p className="text-sm text-muted-foreground text-center py-6">暂无执行记录</p>
             )}

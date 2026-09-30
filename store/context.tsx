@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
 import { store } from '@/lib/store';
+import { api } from '@/lib/api';
 import type { User, Project } from '@/lib/types';
 
 interface AuthContextType {
@@ -47,20 +48,18 @@ interface ProjectContextType {
 const ProjectContext = createContext<ProjectContextType>({ currentProject: null, projects: [], setProjectId: () => {}, refresh: () => {} });
 
 export function ProjectProvider({ children }: { children: ReactNode }) {
-  const [projects, setProjects] = useState<Project[]>(store.getProjects());
+  const [projects, setProjects] = useState<Project[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(
     () => localStorage.getItem('currentProjectId')
   );
 
   const refresh = useCallback(() => {
-    setProjects(store.getProjects());
+    api.getProjects().then(list => setProjects(list as unknown as Project[])).catch(() => {});
   }, []);
 
   useEffect(() => {
-    return store.subscribe(() => {
-      setProjects(store.getProjects());
-    });
-  }, []);
+    refresh();
+  }, [refresh]);
 
   const currentProject = projects.find(p => p.id === currentProjectId) ?? projects[0] ?? null;
 

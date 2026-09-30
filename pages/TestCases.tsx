@@ -1,6 +1,6 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { store } from '@/lib/store';
+import { api } from '@/lib/api';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -19,13 +19,14 @@ const statusOrder: Record<string, number> = { pending: 0, blocked: 1, failed: 2,
 
 export default function TestCasesPage() {
   const { id } = useParams<{ id: string }>();
-  const cases = store.getTestCases(id!);
-  const plans = store.getTestPlans(id!);
+  const [cases, setCases] = useState<any[]>([]);
+  const [plans, setPlans] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState('');
   const [desc, setDesc] = useState('');
   const [priority, setPriority] = useState<string>('P1');
-  const [planId, setPlanId] = useState(plans[0]?.id ?? '');
+  const [planId, setPlanId] = useState('');
   const [steps, setSteps] = useState('');
   const [expected, setExpected] = useState('');
   const [precondition, setPrecondition] = useState('');
@@ -39,11 +40,27 @@ export default function TestCasesPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [c, p] = await Promise.all([
+        api.getTestCases(id),
+        api.getTestPlans(id),
+      ]);
+      setCases(c as any[]);
+      setPlans(p as any[]);
+      if (p.length > 0 && !planId) setPlanId(p[0].id);
+    } catch {}
+    setLoading(false);
+  }, [id]);
+
+  useEffect(() => { loadData(); }, [loadData]);
+
   const filtered = useMemo(() => {
     let result = [...cases];
     if (search) {
       const q = search.toLowerCase();
-      result = result.filter(c => c.name.toLowerCase().includes(q) || c.description?.toLowerCase().includes(q));
+      result = result.filter(c => (c.name || '').toLowerCase().includes(q) || (c.description || '').toLowerCase().includes(q));
     }
     if (filterStatus !== 'all') result = result.filter(c => c.status === filterStatus);
     if (filterPriority !== 'all') result = result.filter(c => c.priority === filterPriority);
@@ -52,10 +69,10 @@ export default function TestCasesPage() {
     result.sort((a, b) => {
       let cmp = 0;
       switch (sortField) {
-        case 'name': cmp = a.name.localeCompare(b.name); break;
+        case 'name': cmp = (a.name || '').localeCompare(b.name || ''); break;
         case 'priority': cmp = (priorityOrder[a.priority] ?? 9) - (priorityOrder[b.priority] ?? 9); break;
         case 'status': cmp = (statusOrder[a.status] ?? 9) - (statusOrder[b.status] ?? 9); break;
-        case 'order': cmp = a.executionOrder - b.executionOrder; break;
+        case 'order': cmp = (a.executionOrder || 0) - (b.executionOrder || 0); break;
       }
       return sortDir === 'asc' ? cmp : -cmp;
     });
@@ -69,9 +86,9 @@ export default function TestCasesPage() {
     else { setSortField(field); setSortDir('asc'); }
   };
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     if (!name.trim() || !planId) return;
-    store.createTestCase({
+    await api.createTestCase({
       planId, projectId: id!, name: name.trim(), description: desc.trim(),
       precondition, steps, expectedResult: expected,
       priority: priority as 'P0' | 'P1' | 'P2' | 'P3',
@@ -79,6 +96,12 @@ export default function TestCasesPage() {
     });
     setShowCreate(false);
     setName(''); setDesc(''); setSteps(''); setExpected(''); setPrecondition('');
+    loadData();
+  };
+
+  const handleReorder = async (caseId: string, newOrder: number) => {
+    await api.updateTestCase(caseId, { sortOrder: newOrder });
+    loadData();
   };
 
   const statusColor = (s: string) => {
@@ -122,6 +145,8 @@ export default function TestCasesPage() {
     </th>
   );
 
+  if (loading) return <div className="py-12 text-center text-muted-foreground">加载中...</div>;
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -138,7 +163,7 @@ export default function TestCasesPage() {
                 <label className="text-xs font-medium">所属计划 *</label>
                 <Select value={planId} onValueChange={setPlanId}>
                   <SelectTrigger className="h-9 text-sm"><SelectValue placeholder="选择计划" /></SelectTrigger>
-                  <SelectContent>{plans.map(p => <SelectItem key={p.id} value={p.id}>{p.title}</SelectItem>)}</SelectContent>
+                  <SelectContent>{plans.map((p: any) => <SelectItem key={p.id} value={p.id}>{p.title}</SelectItem>)}</SelectContent>
                 </Select>
               </div>
               <div className="space-y-1.5">
@@ -209,7 +234,7 @@ export default function TestCasesPage() {
           <SelectTrigger className="h-8 w-36 text-xs"><SelectValue placeholder="测试计划" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部计划</SelectItem>
-            {plans.map(p => <SelectItem key={p.id} value={p.id}>{p.title}</SelectItem>)}
+            {plans.map((p: any) => <SelectItem key={p.id} value={p.id}>{p.title}</SelectItem>)}
           </SelectContent>
         </Select>
       </div>
@@ -262,16 +287,16 @@ export default function TestCasesPage() {
                         const idx = cases.findIndex(x => x.id === c.id);
                         if (idx > 0) {
                           const prev = cases[idx - 1];
-                          store.updateTestCase(prev.id, { executionOrder: c.executionOrder });
-                          store.updateTestCase(c.id, { executionOrder: prev.executionOrder });
+                          handleReorder(prev.id, c.executionOrder);
+                          handleReorder(c.id, prev.executionOrder);
                         }
                       }}><ChevronUp className="h-3 w-3" /></Button>
                       <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => {
                         const idx = cases.findIndex(x => x.id === c.id);
                         if (idx < cases.length - 1) {
                           const next = cases[idx + 1];
-                          store.updateTestCase(next.id, { executionOrder: c.executionOrder });
-                          store.updateTestCase(c.id, { executionOrder: next.executionOrder });
+                          handleReorder(next.id, c.executionOrder);
+                          handleReorder(c.id, next.executionOrder);
                         }
                       }}><ChevronDown className="h-3 w-3" /></Button>
                     </div>

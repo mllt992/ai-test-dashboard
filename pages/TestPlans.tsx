@@ -1,6 +1,6 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { store } from '@/lib/store';
+import { api } from '@/lib/api';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -12,7 +12,9 @@ import { Plus, ClipboardList, Search, ArrowUpDown } from 'lucide-react';
 
 export default function TestPlansPage() {
   const { id } = useParams<{ id: string }>();
-  const plans = store.getTestPlans(id!);
+  const [plans, setPlans] = useState<any[]>([]);
+  const [cases, setCases] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
@@ -23,11 +25,27 @@ export default function TestPlansPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
-  const handleCreate = () => {
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [p, c] = await Promise.all([
+        api.getTestPlans(id),
+        api.getTestCases(id),
+      ]);
+      setPlans(p as any[]);
+      setCases(c as any[]);
+    } catch {}
+    setLoading(false);
+  }, [id]);
+
+  useEffect(() => { loadData(); }, [loadData]);
+
+  const handleCreate = async () => {
     if (!title.trim()) return;
-    store.createTestPlan(id!, title.trim(), desc.trim());
+    await api.createTestPlan(id!, title.trim(), desc.trim());
     setShowCreate(false);
     setTitle(''); setDesc('');
+    loadData();
   };
 
   const statusLabel = (s: string) => {
@@ -50,15 +68,15 @@ export default function TestPlansPage() {
     let result = plans;
     if (search.trim()) {
       const q = search.toLowerCase();
-      result = result.filter(p => p.title.toLowerCase().includes(q) || (p.description || '').toLowerCase().includes(q));
+      result = result.filter(p => (p.title || '').toLowerCase().includes(q) || (p.description || '').toLowerCase().includes(q));
     }
     if (statusFilter !== 'all') result = result.filter(p => p.status === statusFilter);
 
     const sorted = [...result];
     switch (sortBy) {
-      case 'title-asc': sorted.sort((a, b) => a.title.localeCompare(b.title)); break;
-      case 'title-desc': sorted.sort((a, b) => b.title.localeCompare(a.title)); break;
-      case 'status-asc': sorted.sort((a, b) => a.status.localeCompare(b.status)); break;
+      case 'title-asc': sorted.sort((a, b) => (a.title || '').localeCompare(b.title || '')); break;
+      case 'title-desc': sorted.sort((a, b) => (b.title || '').localeCompare(a.title || '')); break;
+      case 'status-asc': sorted.sort((a, b) => (a.status || '').localeCompare(b.status || '')); break;
       case 'date-asc': sorted.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()); break;
       case 'date-desc': default: sorted.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()); break;
     }
@@ -66,6 +84,17 @@ export default function TestPlansPage() {
   }, [plans, search, statusFilter, sortBy]);
 
   const paged = useMemo(() => filtered.slice((page - 1) * pageSize, page * pageSize), [filtered, page, pageSize]);
+
+  const casesByPlan = useMemo(() => {
+    const map: Record<string, any[]> = {};
+    cases.forEach(c => {
+      if (!map[c.planId]) map[c.planId] = [];
+      map[c.planId].push(c);
+    });
+    return map;
+  }, [cases]);
+
+  if (loading) return <div className="py-12 text-center text-muted-foreground">加载中...</div>;
 
   return (
     <div className="space-y-6">
@@ -127,9 +156,9 @@ export default function TestPlansPage() {
 
       <div className="space-y-3">
         {paged.map(plan => {
-          const cases = store.getTestCasesByPlan(plan.id);
-          const passed = cases.filter(c => c.status === 'passed').length;
-          const failed = cases.filter(c => c.status === 'failed').length;
+          const planCases = casesByPlan[plan.id] || [];
+          const passed = planCases.filter((c: any) => c.status === 'passed').length;
+          const failed = planCases.filter((c: any) => c.status === 'failed').length;
           return (
             <Card key={plan.id}>
               <CardContent className="pt-5">
@@ -142,10 +171,10 @@ export default function TestPlansPage() {
                 </div>
                 {plan.description && <p className="text-xs text-muted-foreground mb-3">{plan.description}</p>}
                 <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                  <span>共 {cases.length} 用例</span>
+                  <span>共 {planCases.length} 用例</span>
                   <span className="text-green-600">{passed} 通过</span>
                   <span className="text-red-600">{failed} 失败</span>
-                  <span className="ml-auto">{cases.length > 0 ? Math.round((passed / cases.length) * 100) : 0}% 通过率</span>
+                  <span className="ml-auto">{planCases.length > 0 ? Math.round((passed / planCases.length) * 100) : 0}% 通过率</span>
                 </div>
               </CardContent>
             </Card>

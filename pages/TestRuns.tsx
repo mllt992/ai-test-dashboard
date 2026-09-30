@@ -1,6 +1,6 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { store } from '@/lib/store';
+import { api } from '@/lib/api';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -13,21 +13,22 @@ import { Plus, PlaySquare, CheckCircle2, XCircle, Clock, SkipForward, Camera, Se
 
 export default function TestRunsPage() {
   const { id } = useParams<{ id: string }>();
-  const runs = store.getTestRuns(id!);
-  const plans = store.getTestPlans(id!);
+  const [runs, setRuns] = useState<any[]>([]);
+  const [plans, setPlans] = useState<any[]>([]);
+  const [allResults, setAllResults] = useState<any[]>([]);
+  const [allCases, setAllCases] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [showResult, setShowResult] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [trigger, setTrigger] = useState<'manual' | 'ai' | 'ci'>('manual');
   const [env, setEnv] = useState('');
-  const [planId, setPlanId] = useState(plans[0]?.id ?? '');
+  const [planId, setPlanId] = useState('');
   const [resultCaseId, setResultCaseId] = useState('');
   const [resultStatus, setResultStatus] = useState<'passed' | 'failed' | 'skipped' | 'blocked'>('passed');
   const [resultActual, setResultActual] = useState('');
   const [resultError, setResultError] = useState('');
   const [resultDuration, setResultDuration] = useState('1000');
-  const [screenshotData, setScreenshotData] = useState<string[]>([]);
-  const [screenshotCaption, setScreenshotCaption] = useState('');
 
   const [search, setSearch] = useState('');
   const [filterTrigger, setFilterTrigger] = useState('all');
@@ -36,11 +37,31 @@ export default function TestRunsPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [r, p, results, cases] = await Promise.all([
+        api.getTestRuns(id),
+        api.getTestPlans(id),
+        api.getTestResults(),
+        api.getTestCases(id),
+      ]);
+      setRuns(r as any[]);
+      setPlans(p as any[]);
+      setAllResults(results as any[]);
+      setAllCases(cases as any[]);
+      if (p.length > 0 && !planId) setPlanId(p[0].id);
+    } catch {}
+    setLoading(false);
+  }, [id]);
+
+  useEffect(() => { loadData(); }, [loadData]);
+
   const filtered = useMemo(() => {
     let result = [...runs];
     if (search) {
       const q = search.toLowerCase();
-      result = result.filter(r => r.name.toLowerCase().includes(q) || r.environment?.toLowerCase().includes(q));
+      result = result.filter(r => (r.name || '').toLowerCase().includes(q) || (r.environment || '').toLowerCase().includes(q));
     }
     if (filterTrigger !== 'all') result = result.filter(r => r.trigger === filterTrigger);
     if (filterPlan !== 'all') result = result.filter(r => r.planId === filterPlan);
@@ -48,7 +69,7 @@ export default function TestRunsPage() {
       if (filterStatus === 'finished') result = result.filter(r => !!r.finishedAt);
       else result = result.filter(r => !r.finishedAt);
     }
-    result.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+    result.sort((a, b) => new Date(b.startedAt || b.createdAt).getTime() - new Date(a.startedAt || a.createdAt).getTime());
     return result;
   }, [runs, search, filterTrigger, filterPlan, filterStatus]);
 
@@ -63,35 +84,48 @@ export default function TestRunsPage() {
     ci: runs.filter(r => r.trigger === 'ci').length,
   }), [runs]);
 
-  const handleCreateRun = () => {
+  const resultsByRun = useMemo(() => {
+    const map: Record<string, any[]> = {};
+    allResults.forEach(r => {
+      if (!map[r.runId]) map[r.runId] = [];
+      map[r.runId].push(r);
+    });
+    return map;
+  }, [allResults]);
+
+  const caseMap = useMemo(() => {
+    const map: Record<string, any> = {};
+    allCases.forEach(c => { map[c.id] = c; });
+    return map;
+  }, [allCases]);
+
+  const casesByPlan = useMemo(() => {
+    const map: Record<string, any[]> = {};
+    allCases.forEach(c => {
+      if (!map[c.planId]) map[c.planId] = [];
+      map[c.planId].push(c);
+    });
+    return map;
+  }, [allCases]);
+
+  const handleCreateRun = async () => {
     if (!name.trim() || !planId) return;
-    store.createTestRun(planId, id!, name.trim(), trigger, env.trim());
+    await api.createTestRun({ planId, projectId: id!, name: name.trim(), trigger, environment: env.trim() });
     setShowCreate(false);
     setName(''); setEnv('');
+    loadData();
   };
 
-  const handleSubmitResult = (runId: string) => {
+  const handleSubmitResult = async (runId: string) => {
     if (!resultCaseId) return;
-    const result = store.submitTestResult(runId, resultCaseId, resultStatus, resultActual, resultError, parseInt(resultDuration) || 0);
-    screenshotData.forEach((dataUrl, i) => {
-      store.addScreenshot(result.id, dataUrl, screenshotCaption || `截图 ${i + 1}`);
+    await api.createTestResult({
+      runId, caseId: resultCaseId, status: resultStatus,
+      actualResult: resultActual, description: resultActual,
+      durationMs: parseInt(resultDuration) || 0,
     });
     setShowResult(null);
     setResultCaseId(''); setResultActual(''); setResultError(''); setResultDuration('1000');
-    setScreenshotData([]); setScreenshotCaption('');
-  };
-
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files) return;
-    Array.from(files).forEach(file => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const data = reader.result;
-        if (typeof data === 'string') setScreenshotData(prev => [...prev, data]);
-      };
-      reader.readAsDataURL(file);
-    });
+    loadData();
   };
 
   const statusIcon = (s: string) => {
@@ -102,6 +136,8 @@ export default function TestRunsPage() {
       default: return <Clock className="h-4 w-4 text-yellow-500" />;
     }
   };
+
+  if (loading) return <div className="py-12 text-center text-muted-foreground">加载中...</div>;
 
   return (
     <div className="space-y-4">
@@ -119,7 +155,7 @@ export default function TestRunsPage() {
                 <label className="text-xs font-medium">所属计划 *</label>
                 <Select value={planId} onValueChange={setPlanId}>
                   <SelectTrigger className="h-9 text-sm"><SelectValue /></SelectTrigger>
-                  <SelectContent>{plans.map(p => <SelectItem key={p.id} value={p.id}>{p.title}</SelectItem>)}</SelectContent>
+                  <SelectContent>{plans.map((p: any) => <SelectItem key={p.id} value={p.id}>{p.title}</SelectItem>)}</SelectContent>
                 </Select>
               </div>
               <div className="space-y-1.5">
@@ -173,7 +209,7 @@ export default function TestRunsPage() {
           <SelectTrigger className="h-8 w-36 text-xs"><SelectValue placeholder="测试计划" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部计划</SelectItem>
-            {plans.map(p => <SelectItem key={p.id} value={p.id}>{p.title}</SelectItem>)}
+            {plans.map((p: any) => <SelectItem key={p.id} value={p.id}>{p.title}</SelectItem>)}
           </SelectContent>
         </Select>
       </div>
@@ -195,10 +231,10 @@ export default function TestRunsPage() {
 
       <div className="space-y-4">
         {paged.map(run => {
-          const results = store.getTestResults(run.id);
-          const passed = results.filter(r => r.status === 'passed').length;
-          const failed = results.filter(r => r.status === 'failed').length;
-          const plan = store.getTestPlan(run.planId);
+          const results = resultsByRun[run.id] || [];
+          const passed = results.filter((r: any) => r.status === 'passed').length;
+          const failed = results.filter((r: any) => r.status === 'failed').length;
+          const plan = plans.find((p: any) => p.id === run.planId);
           return (
             <Card key={run.id}>
               <CardContent className="pt-5">
@@ -220,12 +256,12 @@ export default function TestRunsPage() {
                   <span className="text-green-600">{passed} 通过</span>
                   <span className="text-red-600">{failed} 失败</span>
                   <span>共 {results.length} 条结果</span>
-                  <span className="ml-auto">{new Date(run.startedAt).toLocaleString('zh-CN')}</span>
+                  <span className="ml-auto">{new Date(run.startedAt || run.createdAt).toLocaleString('zh-CN')}</span>
                 </div>
                 <div className="space-y-1.5">
-                  {results.map(r => {
-                    const tc = store.getTestCase(r.caseId);
-                    const screenshots = store.getScreenshots(r.id);
+                  {results.map((r: any) => {
+                    const tc = caseMap[r.caseId];
+                    const screenshots = r.screenshots || [];
                     return (
                       <div key={r.id} className="flex items-center gap-2 p-2 rounded-lg bg-muted/30 text-xs">
                         {statusIcon(r.status)}
@@ -248,7 +284,7 @@ export default function TestRunsPage() {
                       <Select value={resultCaseId} onValueChange={setResultCaseId}>
                         <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="选择用例" /></SelectTrigger>
                         <SelectContent>
-                          {(plan ? store.getTestCasesByPlan(plan.id) : []).map(c => (
+                          {(casesByPlan[run.planId] || []).map((c: any) => (
                             <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
                           ))}
                         </SelectContent>
@@ -279,17 +315,6 @@ export default function TestRunsPage() {
                     <div className="space-y-1.5">
                       <label className="text-xs font-medium">耗时(ms)</label>
                       <Input value={resultDuration} onChange={e => setResultDuration(e.target.value)} className="h-8 text-xs" type="number" />
-                    </div>
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-medium">截图</label>
-                      <Input type="file" accept="image/*" multiple onChange={handleFileUpload} className="h-8 text-xs" />
-                      {screenshotData.length > 0 && (
-                        <div className="flex gap-2 flex-wrap mt-1">
-                          {screenshotData.map((d, i) => (
-                            <img key={i} src={d} alt={`screenshot-${i}`} className="h-12 w-12 object-cover rounded border" />
-                          ))}
-                        </div>
-                      )}
                     </div>
                     <div className="flex gap-2">
                       <Button size="sm" onClick={() => handleSubmitResult(run.id)} className="text-xs flex-1">提交</Button>

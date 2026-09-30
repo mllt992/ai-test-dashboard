@@ -1,6 +1,6 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { store } from '@/lib/store';
+import { api } from '@/lib/api';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -18,7 +18,12 @@ const statusOrder: Record<string, number> = { open: 0, reopened: 1, in_progress:
 
 export default function DefectsPage() {
   const { id } = useParams<{ id: string }>();
-  const defects = store.getDefects(id!);
+  const [defects, setDefects] = useState<any[]>([]);
+  const [allCases, setAllCases] = useState<any[]>([]);
+  const [allResults, setAllResults] = useState<any[]>([]);
+  const [allSolutions, setAllSolutions] = useState<any[]>([]);
+  const [allRetests, setAllRetests] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
   const [filterSeverity, setFilterSeverity] = useState('all');
   const [search, setSearch] = useState('');
@@ -36,11 +41,62 @@ export default function DefectsPage() {
   const [retestStatus, setRetestStatus] = useState<'passed' | 'failed'>('passed');
   const [retestNotes, setRetestNotes] = useState('');
 
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [d, cases, results, solutions, retests] = await Promise.all([
+        api.getDefects(id),
+        api.getTestCases(id),
+        api.getTestResults(),
+        api.getSolutions(),
+        api.getRetests(),
+      ]);
+      setDefects(d as any[]);
+      setAllCases(cases as any[]);
+      setAllResults(results as any[]);
+      setAllSolutions(solutions as any[]);
+      setAllRetests(retests as any[]);
+    } catch {}
+    setLoading(false);
+  }, [id]);
+
+  useEffect(() => { loadData(); }, [loadData]);
+
+  const caseMap = useMemo(() => {
+    const m: Record<string, any> = {};
+    allCases.forEach(c => { m[c.id] = c; });
+    return m;
+  }, [allCases]);
+
+  const resultMap = useMemo(() => {
+    const m: Record<string, any> = {};
+    allResults.forEach(r => { m[r.id] = r; });
+    return m;
+  }, [allResults]);
+
+  const solutionsByDefect = useMemo(() => {
+    const m: Record<string, any[]> = {};
+    allSolutions.forEach(s => {
+      if (!m[s.defectId]) m[s.defectId] = [];
+      m[s.defectId].push(s);
+    });
+    return m;
+  }, [allSolutions]);
+
+  const retestsByDefect = useMemo(() => {
+    const m: Record<string, any[]> = {};
+    allRetests.forEach(r => {
+      if (!m[r.defectId]) m[r.defectId] = [];
+      m[r.defectId].push(r);
+    });
+    return m;
+  }, [allRetests]);
+
   const filtered = useMemo(() => {
     let result = [...defects];
     if (search) {
       const q = search.toLowerCase();
-      result = result.filter(d => d.title.toLowerCase().includes(q) || d.description?.toLowerCase().includes(q));
+      result = result.filter(d => (d.title || '').toLowerCase().includes(q) || (d.description || '').toLowerCase().includes(q));
     }
     if (filter !== 'all') result = result.filter(d => d.status === filter);
     if (filterSeverity !== 'all') result = result.filter(d => d.severity === filterSeverity);
@@ -51,7 +107,7 @@ export default function DefectsPage() {
         case 'date': cmp = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(); break;
         case 'severity': cmp = (severityOrder[a.severity] ?? 9) - (severityOrder[b.severity] ?? 9); break;
         case 'status': cmp = (statusOrder[a.status] ?? 9) - (statusOrder[b.status] ?? 9); break;
-        case 'title': cmp = a.title.localeCompare(b.title); break;
+        case 'title': cmp = (a.title || '').localeCompare(b.title || ''); break;
       }
       return sortDir === 'asc' ? cmp : -cmp;
     });
@@ -60,26 +116,34 @@ export default function DefectsPage() {
 
   const paged = filtered.slice((page - 1) * pageSize, page * pageSize);
 
-  const handleSort = (field: SortField) => {
-    if (sortField === field) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
-    else { setSortField(field); setSortDir(field === 'date' ? 'desc' : 'asc'); }
-  };
-
-  const handleAddSolution = (defectId: string) => {
+  const handleAddSolution = async (defectId: string) => {
     if (!solTitle.trim()) return;
-    store.createSolution(defectId, solTitle.trim(), '', solRootCause, solFix, solCommit);
+    await api.createSolution({
+      defectId, title: solTitle.trim(), rootCause: solRootCause,
+      fixDescription: solFix, fixCommitUrl: solCommit,
+    });
     setShowSolution(null);
     setSolTitle(''); setSolRootCause(''); setSolFix(''); setSolCommit('');
+    loadData();
   };
 
-  const handleRetest = (defectId: string) => {
-    const defect = store.getDefect(defectId);
+  const handleRetest = async (defectId: string) => {
+    const defect = defects.find(d => d.id === defectId);
     if (!defect) return;
-    const result = store.getResult(defect.resultId);
-    if (!result) return;
-    store.createRetest(defectId, result.id, result.runId, retestStatus, retestNotes);
+    const result = resultMap[defect.resultId];
+    await api.createRetest({
+      defectId, status: retestStatus, notes: retestNotes,
+      resultId: result?.id || '', runId: result?.runId || '',
+    });
     setShowRetest(null);
     setRetestNotes('');
+    loadData();
+  };
+
+  const handleStatusFlow = async (defect: any) => {
+    const next = defect.status === 'open' ? 'in_progress' : defect.status === 'in_progress' ? 'fixed' : defect.status === 'fixed' ? 'verified' : 'closed';
+    await api.updateDefect(defect.id, { status: next });
+    loadData();
   };
 
   const severityColor = (s: string) => {
@@ -122,6 +186,8 @@ export default function DefectsPage() {
     critical: defects.filter(d => d.severity === 'critical').length,
     major: defects.filter(d => d.severity === 'major').length,
   }), [defects]);
+
+  if (loading) return <div className="py-12 text-center text-muted-foreground">加载中...</div>;
 
   return (
     <div className="space-y-4">
@@ -184,11 +250,10 @@ export default function DefectsPage() {
 
       <div className="space-y-3">
         {paged.map(defect => {
-          const tc = store.getTestCase(defect.caseId);
-          const result = store.getResult(defect.resultId);
-          const solutions = store.getSolutions(defect.id);
-          const retests = store.getRetests(defect.id);
-          const screenshots = result ? store.getScreenshots(result.id) : [];
+          const tc = caseMap[defect.caseId];
+          const result = resultMap[defect.resultId];
+          const solutions = solutionsByDefect[defect.id] || [];
+          const retests = retestsByDefect[defect.id] || [];
           const isExpanded = expandedDefect === defect.id;
 
           return (
@@ -224,16 +289,9 @@ export default function DefectsPage() {
                               <div className={`h-6 w-6 rounded-full flex items-center justify-center ${result?.status === 'passed' ? 'bg-green-100' : result?.status === 'failed' ? 'bg-red-100' : 'bg-gray-100'}`}>
                                 {result?.status === 'passed' ? <CheckCircle2 className="h-3 w-3 text-green-600" /> : <XCircle className="h-3 w-3 text-red-600" />}
                               </div>
-                              <span>执行结果: {result?.actualResult ?? '-'}</span>
+                              <span>执行结果: {result?.actualResult || result?.description || '-'}</span>
                               {result?.errorLog && <span className="text-red-500 truncate max-w-xs">{result.errorLog.split('\n')[0]}</span>}
                             </div>
-                            {screenshots.length > 0 && (
-                              <div className="ml-8 flex gap-1.5">
-                                {screenshots.map(s => (
-                                  <img key={s.id} src={s.dataUrl} alt={s.caption} className="h-10 w-10 object-cover rounded border" title={s.caption} />
-                                ))}
-                              </div>
-                            )}
                           </div>
                           <div className="ml-3 border-l-2 border-dashed pl-3">
                             <div className="flex items-center gap-2 text-xs">
@@ -241,7 +299,7 @@ export default function DefectsPage() {
                               <span className="font-medium text-red-700">{defect.title}</span>
                             </div>
                           </div>
-                          {solutions.map(sol => (
+                          {solutions.map((sol: any) => (
                             <div key={sol.id} className="ml-3 border-l-2 border-dashed pl-3">
                               <div className="flex items-center gap-2 text-xs">
                                 <div className="h-6 w-6 rounded-full bg-green-100 flex items-center justify-center"><Lightbulb className="h-3 w-3 text-green-600" /></div>
@@ -254,7 +312,7 @@ export default function DefectsPage() {
                               </div>
                             </div>
                           ))}
-                          {retests.map(rt => (
+                          {retests.map((rt: any) => (
                             <div key={rt.id} className="ml-3 border-l-2 border-dashed pl-3">
                               <div className="flex items-center gap-2 text-xs">
                                 <div className={`h-6 w-6 rounded-full flex items-center justify-center ${rt.status === 'passed' ? 'bg-emerald-100' : 'bg-orange-100'}`}>
@@ -265,7 +323,7 @@ export default function DefectsPage() {
                                     复测: {rt.status === 'passed' ? '通过' : '失败'}
                                   </span>
                                   {rt.notes && <p className="text-muted-foreground">{rt.notes}</p>}
-                                  <p className="text-muted-foreground">{new Date(rt.retestedAt).toLocaleString('zh-CN')}</p>
+                                  <p className="text-muted-foreground">{new Date(rt.retestedAt || rt.createdAt).toLocaleString('zh-CN')}</p>
                                 </div>
                               </div>
                             </div>
@@ -283,10 +341,7 @@ export default function DefectsPage() {
                               <RotateCcw className="h-3 w-3 mr-1" />创建复测
                             </Button>
                           )}
-                          <Button size="sm" variant="ghost" onClick={() => {
-                            const next = defect.status === 'open' ? 'in_progress' : defect.status === 'in_progress' ? 'fixed' : defect.status === 'fixed' ? 'verified' : 'closed';
-                            store.updateDefect(defect.id, { status: next as any });
-                          }} className="text-xs">
+                          <Button size="sm" variant="ghost" onClick={() => handleStatusFlow(defect)} className="text-xs">
                             流转状态 → {statusLabel(defect.status === 'open' ? 'in_progress' : defect.status === 'in_progress' ? 'fixed' : defect.status === 'fixed' ? 'verified' : 'closed')}
                           </Button>
                         </div>
@@ -353,7 +408,7 @@ export default function DefectsPage() {
           </div>
         )}
         {filtered.length > pageSize && (
-          <DataTablePagination total={filtered.length} page={page} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={setPageSize} />
+          <DataTablePagination total={filtered.length} page={page} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={s => { setPageSize(s); setPage(1); }} />
         )}
       </div>
     </div>

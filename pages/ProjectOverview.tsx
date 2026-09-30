@@ -1,21 +1,58 @@
+import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { store } from '@/lib/store';
+import { api } from '@/lib/api';
+import { computeDashboardStats } from '@/lib/stats';
 import { useProject } from '@/store/context';
+import type { TestCase, TestResult, Defect, TestPlan } from '@/lib/types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Link } from 'react-router-dom';
-import { CheckCircle2, XCircle, Clock, SkipForward, Bug, FlaskConical, ClipboardList, Timer } from 'lucide-react';
+import { CheckCircle2, XCircle, Bug, FlaskConical, ClipboardList, Timer } from 'lucide-react';
 
 export default function ProjectOverviewPage() {
   const { id } = useParams<{ id: string }>();
   const { currentProject } = useProject();
-  const project = currentProject?.id === id ? currentProject : store.getProject(id!);
-  if (!project) return <div className="p-8 text-center text-muted-foreground">项目不存在</div>;
+  const [project, setProject] = useState<any>(null);
+  const [stats, setStats] = useState<ReturnType<typeof computeDashboardStats> | null>(null);
+  const [plans, setPlans] = useState<TestPlan[]>([]);
+  const [defects, setDefects] = useState<Defect[]>([]);
+  const [planCases, setPlanCases] = useState<Record<string, TestCase[]>>({});
+  const [loading, setLoading] = useState(true);
 
-  const stats = store.getDashboardStats(project.id);
-  const plans = store.getTestPlans(project.id);
-  const defects = store.getDefects(project.id);
+  useEffect(() => {
+    (async () => {
+      const p = currentProject?.id === id ? currentProject : await api.getProject(id!);
+      if (!p) { setLoading(false); return; }
+      setProject(p);
+
+      const [cases, allResults, defectList, planList] = await Promise.all([
+        api.getTestCases(id!),
+        api.getTestResults(),
+        api.getDefects(id!),
+        api.getTestPlans(id!),
+      ]);
+
+      const typedCases = cases as unknown as TestCase[];
+      const typedResults = allResults.filter((r: any) => typedCases.some(c => c.id === r.caseId)) as unknown as TestResult[];
+      const typedDefects = defectList as unknown as Defect[];
+      const typedPlans = planList as unknown as TestPlan[];
+
+      setDefects(typedDefects);
+      setPlans(typedPlans);
+      setStats(computeDashboardStats(typedCases, typedResults, typedDefects, typedPlans.length));
+
+      const caseMap: Record<string, TestCase[]> = {};
+      for (const plan of typedPlans) {
+        caseMap[plan.id] = typedCases.filter(c => c.planId === plan.id);
+      }
+      setPlanCases(caseMap);
+      setLoading(false);
+    })().catch(() => setLoading(false));
+  }, [id, currentProject]);
+
+  if (loading) return <div className="p-8 text-center text-muted-foreground">加载中...</div>;
+  if (!project) return <div className="p-8 text-center text-muted-foreground">项目不存在</div>;
 
   const severityColor = (s: string) => {
     switch (s) {
@@ -26,12 +63,14 @@ export default function ProjectOverviewPage() {
     }
   };
 
+  const s = stats || { caseCount: 0, passRate: 0, openDefects: 0, passed: 0, failed: 0, skipped: 0, blocked: 0, total: 0, totalDuration: 0, planCount: 0, failedCount: 0, recentResults: [] };
+
   const statCards = [
-    { label: '测试计划', value: stats.planCount, icon: ClipboardList, iconColor: 'text-blue-600', bgLight: 'bg-blue-50' },
-    { label: '测试用例', value: stats.caseCount, icon: FlaskConical, iconColor: 'text-violet-600', bgLight: 'bg-violet-50' },
-    { label: '通过率', value: `${stats.passRate}%`, icon: CheckCircle2, iconColor: 'text-emerald-600', bgLight: 'bg-emerald-50' },
-    { label: '失败用例', value: stats.failedCount, icon: XCircle, iconColor: 'text-rose-600', bgLight: 'bg-rose-50' },
-    { label: '总耗时', value: `${(stats.totalDuration / 1000).toFixed(1)}s`, icon: Timer, iconColor: 'text-cyan-600', bgLight: 'bg-cyan-50' },
+    { label: '测试计划', value: s.planCount, icon: ClipboardList, iconColor: 'text-blue-600', bgLight: 'bg-blue-50' },
+    { label: '测试用例', value: s.caseCount, icon: FlaskConical, iconColor: 'text-violet-600', bgLight: 'bg-violet-50' },
+    { label: '通过率', value: `${s.passRate}%`, icon: CheckCircle2, iconColor: 'text-emerald-600', bgLight: 'bg-emerald-50' },
+    { label: '失败用例', value: s.failedCount, icon: XCircle, iconColor: 'text-rose-600', bgLight: 'bg-rose-50' },
+    { label: '总耗时', value: `${(s.totalDuration / 1000).toFixed(1)}s`, icon: Timer, iconColor: 'text-cyan-600', bgLight: 'bg-cyan-50' },
   ];
 
   return (
@@ -43,7 +82,7 @@ export default function ProjectOverviewPage() {
         </div>
         <div className="flex gap-2">
           <Badge variant="outline" className="text-xs font-medium">{project.status === 'active' ? '活跃' : '已归档'}</Badge>
-          {project.tags.map(t => <Badge key={t} variant="secondary" className="text-xs font-medium">{t}</Badge>)}
+          {(project.tags || []).map((t: string) => <Badge key={t} variant="secondary" className="text-xs font-medium">{t}</Badge>)}
         </div>
       </div>
 
@@ -73,10 +112,10 @@ export default function ProjectOverviewPage() {
           <CardContent>
             <div className="space-y-3">
               {[
-                { label: '通过', count: stats.passed, total: stats.total, color: 'bg-emerald-500' },
-                { label: '失败', count: stats.failed, total: stats.total, color: 'bg-rose-500' },
-                { label: '跳过', count: stats.skipped, total: stats.total, color: 'bg-gray-400' },
-                { label: '阻塞', count: stats.blocked, total: stats.total, color: 'bg-amber-500' },
+                { label: '通过', count: s.passed, total: s.total, color: 'bg-emerald-500' },
+                { label: '失败', count: s.failed, total: s.total, color: 'bg-rose-500' },
+                { label: '跳过', count: s.skipped, total: s.total, color: 'bg-gray-400' },
+                { label: '阻塞', count: s.blocked, total: s.total, color: 'bg-amber-500' },
               ].map(item => (
                 <div key={item.label} className="flex items-center gap-3">
                   <span className="text-xs w-8 text-muted-foreground font-medium">{item.label}</span>
@@ -90,9 +129,9 @@ export default function ProjectOverviewPage() {
             <div className="mt-5 pt-4 border-t">
               <div className="flex items-center justify-between text-sm">
                 <span className="text-muted-foreground font-medium">总通过率</span>
-                <span className="font-bold text-xl tabular-nums">{stats.passRate}%</span>
+                <span className="font-bold text-xl tabular-nums">{s.passRate}%</span>
               </div>
-              <Progress value={stats.passRate} className="mt-2.5 h-2.5" />
+              <Progress value={s.passRate} className="mt-2.5 h-2.5" />
             </div>
           </CardContent>
         </Card>
@@ -125,7 +164,7 @@ export default function ProjectOverviewPage() {
         <CardContent>
           <div className="space-y-2">
             {plans.map(plan => {
-              const cases = store.getTestCasesByPlan(plan.id);
+              const cases = planCases[plan.id] || [];
               const passed = cases.filter(c => c.status === 'passed').length;
               return (
                 <Link key={plan.id} to={`/p/${project.id}/plans`} className="block p-4 -mx-3 rounded-xl hover:bg-muted/40 transition-colors group">

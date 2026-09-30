@@ -1,6 +1,6 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { store } from '@/lib/store';
+import { api } from '@/lib/api';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -12,7 +12,8 @@ import { Plus, Link2, ExternalLink, GitPullRequest, Globe, Search, ArrowUpDown }
 
 export default function ExternalTasksPage() {
   const { id } = useParams<{ id: string }>();
-  const tasks = store.getExternalTasks(id!);
+  const [tasks, setTasks] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [title, setTitle] = useState('');
   const [source, setSource] = useState<'jira' | 'github' | 'manual' | 'other'>('jira');
@@ -25,11 +26,25 @@ export default function ExternalTasksPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
-  const handleCreate = () => {
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const t = await api.getExternalTasks(id);
+      setTasks(t as any[]);
+    } catch {}
+    setLoading(false);
+  }, [id]);
+
+  useEffect(() => { loadData(); }, [loadData]);
+
+  const handleCreate = async () => {
     if (!title.trim()) return;
-    store.createExternalTask(id!, title.trim(), source, url, extId);
+    await api.createExternalTask({
+      projectId: id!, title: title.trim(), source, externalUrl: url, externalId: extId,
+    });
     setShowCreate(false);
     setTitle(''); setUrl(''); setExtId('');
+    loadData();
   };
 
   const sourceIcon = (s: string) => {
@@ -60,15 +75,15 @@ export default function ExternalTasksPage() {
     let result = tasks;
     if (search.trim()) {
       const q = search.toLowerCase();
-      result = result.filter(t => t.title.toLowerCase().includes(q) || (t.externalId || '').toLowerCase().includes(q));
+      result = result.filter(t => (t.title || '').toLowerCase().includes(q) || (t.externalId || '').toLowerCase().includes(q));
     }
     if (sourceFilter !== 'all') result = result.filter(t => t.source === sourceFilter);
 
     const sorted = [...result];
     switch (sortBy) {
-      case 'title-asc': sorted.sort((a, b) => a.title.localeCompare(b.title)); break;
-      case 'title-desc': sorted.sort((a, b) => b.title.localeCompare(a.title)); break;
-      case 'source-asc': sorted.sort((a, b) => a.source.localeCompare(b.source)); break;
+      case 'title-asc': sorted.sort((a, b) => (a.title || '').localeCompare(b.title || '')); break;
+      case 'title-desc': sorted.sort((a, b) => (b.title || '').localeCompare(a.title || '')); break;
+      case 'source-asc': sorted.sort((a, b) => (a.source || '').localeCompare(b.source || '')); break;
       case 'date-asc': sorted.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()); break;
       case 'date-desc': default: sorted.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()); break;
     }
@@ -76,6 +91,8 @@ export default function ExternalTasksPage() {
   }, [tasks, search, sourceFilter, sortBy]);
 
   const paged = useMemo(() => filtered.slice((page - 1) * pageSize, page * pageSize), [filtered, page, pageSize]);
+
+  if (loading) return <div className="py-12 text-center text-muted-foreground">加载中...</div>;
 
   return (
     <div className="space-y-6">

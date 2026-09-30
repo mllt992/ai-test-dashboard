@@ -1,6 +1,8 @@
-import { useState, useMemo } from 'react';
-import { store } from '@/lib/store';
+import { useState, useMemo, useEffect } from 'react';
+import { api } from '@/lib/api';
+import { computeDashboardStats } from '@/lib/stats';
 import { useProject } from '@/store/context';
+import type { Project, TestCase, TestResult, Defect } from '@/lib/types';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -19,11 +21,34 @@ export default function ProjectsPage() {
   const [desc, setDesc] = useState('');
   const [tags, setTags] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [statsMap, setStatsMap] = useState<Record<string, ReturnType<typeof computeDashboardStats>>>({});
 
   const [statusFilter, setStatusFilter] = useState('all');
   const [sortBy, setSortBy] = useState('date-desc');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+
+  useEffect(() => {
+    if (projects.length === 0) return;
+    Promise.all(
+      projects.map(async p => {
+        const [cases, results, defects] = await Promise.all([
+          api.getTestCases(p.id),
+          api.getTestResults(),
+          api.getDefects(p.id),
+        ]);
+        const pResults = results.filter((r: any) => {
+          const c = cases.find((cc: any) => cc.id === r.caseId);
+          return !!c;
+        });
+        return { id: p.id, stats: computeDashboardStats(cases as TestCase[], pResults as TestResult[], defects as Defect[]) };
+      })
+    ).then(arr => {
+      const map: Record<string, ReturnType<typeof computeDashboardStats>> = {};
+      arr.forEach(x => { map[x.id] = x.stats; });
+      setStatsMap(map);
+    }).catch(() => {});
+  }, [projects]);
 
   const statusCounts = useMemo(() => {
     const counts: Record<string, number> = { all: projects.length, active: 0, archived: 0 };
@@ -52,23 +77,25 @@ export default function ProjectsPage() {
 
   const paged = useMemo(() => filtered.slice((page - 1) * pageSize, page * pageSize), [filtered, page, pageSize]);
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     if (!name.trim()) return;
-    store.createProject(name.trim(), desc.trim(), tags.split(',').map(t => t.trim()).filter(Boolean));
+    await api.createProject(name.trim(), desc.trim(), tags.split(',').map(t => t.trim()).filter(Boolean));
     refresh();
     setShowCreate(false);
     setName(''); setDesc(''); setTags('');
   };
 
-  const handleDelete = (id: string) => {
-    store.deleteProject(id);
+  const handleDelete = async (id: string) => {
+    await api.deleteProject(id);
     if (currentProject?.id === id) {
-      const remaining = store.getProjects();
+      const remaining = projects.filter(p => p.id !== id);
       if (remaining.length > 0) setProjectId(remaining[0].id);
     }
     refresh();
     setDeleteTarget(null);
   };
+
+  const emptyStats = { caseCount: 0, passRate: 0, openDefects: 0, passed: 0, failed: 0, skipped: 0, blocked: 0, total: 0, totalDuration: 0, planCount: 0, failedCount: 0, recentResults: [] };
 
   return (
     <div className="space-y-6">
@@ -134,7 +161,7 @@ export default function ProjectsPage() {
 
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
         {paged.map(p => {
-          const stats = store.getDashboardStats(p.id);
+          const stats = statsMap[p.id] || emptyStats;
           return (
             <Card key={p.id} className="hover:shadow-md transition-shadow h-full group">
               <CardContent className="pt-5">
