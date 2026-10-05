@@ -13,7 +13,7 @@ An independent clone and branch `fix/issues-2-8` protected existing work. Main r
 | #3 | Stateless initialize/initialized/ping, typed schemas and pre-write validation | Six MCP tests including official SDK Streamable HTTP handshake and two-case/screenshot batch passed. SDK transport is an in-process HTTP adapter. |
 | #4 | Atomic latest-case state, immutable history, timestamp/UUID ordering and RLS-safe deletion | SQL and real multi-connection submissions/deletion passed. Keep open for logged-in browser refresh of cases, overview and dashboard. |
 | #5 | Solution → fixed, retest → verified/reopened, reopened repair and illegal-transition rejection | REST/MCP/SQL and real competing transactions passed. Keep open for logged-in repair/retest browser acceptance. |
-| #6 | Explicit lifecycle status and finished_at; metadata edits preserve completion time | SQL lifecycle and frontend DTO tests passed. Historical completion times remain unknown rather than inferred from updated_at. |
+| #6 | Explicit lifecycle status and finished_at; metadata edits preserve completion time | SQL lifecycle and frontend DTO tests passed. Keep open for refreshed browser badges/counts/filters; historical completion times remain unknown rather than inferred from updated_at. |
 | #7 | Exact Unicode log persistence/read/display, 65,536-code-point limit and failure-retained form | SQL and DTO round-trip/size/rejection tests passed. Keep open for logged-in browser detail/defect display and failed-save retention. |
 | #8 | Project SQL summaries, scoped bounded history pages, exact result lookup, on-demand trace | Multi-project/full-count tests, 100/100/5 pages over 205 rows and byte comparison passed. Incremental UI/keyset paging remain follow-ups. |
 
