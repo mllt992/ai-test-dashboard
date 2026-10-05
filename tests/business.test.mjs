@@ -112,14 +112,15 @@ test("error logs round trip Unicode and newlines; maximum is code points without
 test("REST and MCP submissions use identical atomic persistence and preserve error logs", async t => {
   const { db, supabase } = await setup(t);
   const log = "MCP\n错误 🔧";
-  const web = await handleApp({ supabase, request: new Request("http://localhost/?action=result_create", { method: "POST", body: JSON.stringify({ runId, caseId, status: "failed", errorLog: log }) }) });
+  const web = await handleApp({ supabase, request: new Request("http://localhost/?action=result_create", { method: "POST", body: JSON.stringify({ runId, caseId, status: "failed", errorLog: log, executedAt: "2026-10-05T00:00:00Z" }) }) });
   assert.equal(web.status, 201);
   assert.equal(await caseStatus(db), "failed");
-  const mcp = await handleApp({ supabase, request: new Request("http://localhost/mcp", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "submit_test_result", arguments: { runId, caseId, status: "passed", errorLog: log } } }) }) });
+  const mcp = await handleApp({ supabase, request: new Request("http://localhost/mcp", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "submit_test_result", arguments: { runId, caseId, status: "passed", errorLog: log, executedAt: "2026-10-05t00:01:00z" } } }) }) });
   const reply = await mcp.json();
   assert.equal(reply.result.isError, undefined);
   const saved = JSON.parse(reply.result.content[0].text);
   assert.equal(saved.error_log, log);
+  assert.equal(new Date(saved.created_at).toISOString(), "2026-10-05T00:01:00.000Z");
   assert.equal(await caseStatus(db), "passed");
 });
 
@@ -277,4 +278,50 @@ test("run/case cascade cannot skip ambiguous parent synchronization under an RLS
   assert.equal(await count(db, "test_cases"), 1);
   assert.equal(await count(db, "test_results"), 1);
   assert.equal(await caseStatus(db), "failed");
+});
+
+test("deleting non-current history under result RLS preserves a hidden newer result's case state", async t => {
+  const { db, supabase } = await setup(t);
+  const older = await submit(supabase, "failed", "2026-10-05T10:00:00Z");
+  const newer = await submit(supabase, "passed", "2026-10-05T11:00:00Z");
+  const before = (await db.query("SELECT status,latest_result_id,latest_result_at,updated_at FROM test_cases WHERE id=$1", [caseId])).rows[0];
+  await db.exec(`CREATE ROLE dashboard_delete_test;
+    GRANT USAGE ON SCHEMA public TO dashboard_delete_test;
+    GRANT SELECT, UPDATE ON test_cases TO dashboard_delete_test;
+    GRANT SELECT, DELETE ON test_results TO dashboard_delete_test;
+    ALTER TABLE test_results ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY visible_failed_results ON test_results FOR ALL TO dashboard_delete_test USING(status='failed') WITH CHECK(status='failed');
+    SET ROLE dashboard_delete_test;`);
+  try {
+    assert.equal((await db.query("SELECT count(*) FROM test_results")).rows[0].count, 1);
+    await db.query("DELETE FROM test_results WHERE id=$1", [older.id]);
+  } finally {
+    await db.exec("RESET ROLE");
+  }
+  assert.equal(await count(db, "test_results"), 1);
+  assert.equal((await db.query("SELECT id FROM test_results")).rows[0].id, newer.id);
+  const after = (await db.query("SELECT status,latest_result_id,latest_result_at,updated_at FROM test_cases WHERE id=$1", [caseId])).rows[0];
+  assert.deepEqual(after, before);
+});
+
+test("deleting the current result under filtered history RLS is rejected and rolled back", async t => {
+  const { db, supabase } = await setup(t);
+  await submit(supabase, "passed", "2026-10-05T10:00:00Z");
+  const current = await submit(supabase, "failed", "2026-10-05T11:00:00Z");
+  const before = (await db.query("SELECT status,latest_result_id,latest_result_at,updated_at FROM test_cases WHERE id=$1", [caseId])).rows[0];
+  await db.exec(`CREATE ROLE dashboard_delete_test;
+    GRANT USAGE ON SCHEMA public TO dashboard_delete_test;
+    GRANT SELECT, UPDATE ON test_cases TO dashboard_delete_test;
+    GRANT SELECT, DELETE ON test_results TO dashboard_delete_test;
+    ALTER TABLE test_results ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY visible_failed_results ON test_results FOR ALL TO dashboard_delete_test USING(status='failed') WITH CHECK(status='failed');
+    SET ROLE dashboard_delete_test;`);
+  try {
+    await assert.rejects(db.query("DELETE FROM test_results WHERE id=$1", [current.id]), error => error.code === "42501" && /result_history_not_fully_visible/.test(error.message));
+  } finally {
+    await db.exec("RESET ROLE");
+  }
+  assert.equal(await count(db, "test_results"), 2);
+  const after = (await db.query("SELECT status,latest_result_id,latest_result_at,updated_at FROM test_cases WHERE id=$1", [caseId])).rows[0];
+  assert.deepEqual(after, before);
 });

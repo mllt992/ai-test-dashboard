@@ -57,10 +57,18 @@ BEGIN
       IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'case_update_not_allowed'; END IF;
     END IF;
   ELSE
-    PERFORM 1 FROM public.test_cases WHERE id = OLD.case_id;
+    SELECT * INTO current_case FROM public.test_cases WHERE id = OLD.case_id FOR UPDATE;
     IF NOT FOUND THEN
       IF NOT pg_catalog.row_security_active('public.test_cases'::regclass) THEN RETURN NULL; END IF;
       RAISE EXCEPTION USING ERRCODE = '23503', MESSAGE = 'case_not_found';
+    END IF;
+    -- Removing older history cannot change the current result, including when
+    -- a policy hides that newer result from this invoker.
+    IF current_case.latest_result_id IS DISTINCT FROM OLD.id THEN RETURN NULL; END IF;
+    -- Recomputing from filtered history could choose an older visible result
+    -- or pending while a hidden result still exists. Refuse partial knowledge.
+    IF pg_catalog.row_security_active('public.test_results'::regclass) THEN
+      RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'result_history_not_fully_visible';
     END IF;
     SELECT * INTO latest FROM public.test_results WHERE case_id = OLD.case_id ORDER BY created_at DESC, id DESC LIMIT 1;
     UPDATE public.test_cases SET status = COALESCE(latest.status, 'pending'), latest_result_at = latest.created_at, latest_result_id = latest.id, updated_at = clock_timestamp() WHERE id = OLD.case_id;

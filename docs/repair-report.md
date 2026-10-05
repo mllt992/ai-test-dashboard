@@ -1,5 +1,7 @@
 # Issues #1–#8 repair report
 
+This section records the completed local preparation stage. Subsequent authorized PR publication/merge is tracked in PR #9 and its checks/comments; historical statements below describe the preparation stage only.
+
 ## Isolation and baseline
 
 Repository: mllt992/ai-test-dashboard. An independent clone and local branch `fix/issues-2-8` were used; no pre-existing checkout or uncommitted changes were touched. The start and pre-delivery remote main checks both resolved to `7d1a9231813bf367018049b54855763b4f98a54d`; only remote main was present, and no open PR was found at the initial check. README was read; no AGENTS.md, .agents directory or repository SKILL.md was present.

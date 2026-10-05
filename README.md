@@ -47,6 +47,13 @@ MCP supports initialize -> notifications/initialized -> tools/list -> tools/call
 
 Current browser-local login, roles and API keys are demonstration state, not server authorization. The anonymous adapter has no application identity or revocation chain. Read [the unresolved deployment/identity decisions](docs/authentication-decisions.md) before any real-data or multi-user deployment. Do not use local keys as evidence of server authentication or reuse the embedded demonstration login as a production credential.
 
-Production artifacts are `dist/` and, where approved, `functions/`. Do not publish the project root, `dev/`, `tests/` or `node_modules/`. A successful local build does not verify deployed gateway policies, RLS or production migrations. No merge, release or deployment is part of this repair.
+Production artifacts are `dist/` and, where approved, `functions/`. Do not publish the project root, `dev/`, `tests/` or `node_modules/`. A successful local build does not verify deployed gateway policies, RLS or production migrations. Release and deployment are not part of this repair.
 
 See `PROVENANCE.md` and `vendor/` for source attribution and preserved licenses.
+
+
+## Pull request checks
+
+`.github/workflows/ci.yml` runs installation, local tests, Function checks and build on pull requests and main. It also runs `npm run test:postgres` against an ephemeral PostgreSQL 17 container bound only to runner loopback port 54329, with database `dashboard_test`. The workflow has read-only repository permissions and no deployment steps or production secrets.
+
+The PostgreSQL test is opt-in and refuses a non-loopback host, a different port or database. It requires `DASHBOARD_TEST_DATABASE=1` and `PG_TEST_URL=postgresql://postgres@127.0.0.1:54329/dashboard_test`. This URL identifies a disposable CI database, not an application credential. Without that explicit opt-in the test is skipped; this must not be reported as a passed multi-connection validation. Do not point it at any existing database.

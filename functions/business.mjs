@@ -29,7 +29,7 @@ export function resultRow(input) {
   const duration = input.durationMs ?? 0;
   if (!Number.isSafeInteger(duration) || duration < 0) throw new BusinessError("invalid_duration");
   if (input.screenshots != null && (!Array.isArray(input.screenshots) || input.screenshots.some(s => !(typeof s === "string" || (s && typeof s === "object" && typeof s.dataUrl === "string" && (s.caption == null || typeof s.caption === "string") && (s.sortOrder == null || Number.isInteger(s.sortOrder) && s.sortOrder >= 0)))))) throw new BusinessError("invalid_screenshots");
-  if (input.executedAt != null && (typeof input.executedAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(input.executedAt))) throw new BusinessError("invalid_execution_time");
+  if (input.executedAt != null && (typeof input.executedAt !== "string" || !/^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/.test(input.executedAt))) throw new BusinessError("invalid_execution_time");
   const executed = input.executedAt == null ? new Date() : new Date(input.executedAt);
   if (!Number.isFinite(executed.getTime())) throw new BusinessError("invalid_execution_time");
   return {
