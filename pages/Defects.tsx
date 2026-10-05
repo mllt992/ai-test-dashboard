@@ -1,6 +1,7 @@
-import { useState, useMemo, useEffect, useCallback } from 'react';
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '@/lib/api';
+import { nextManualDefectStatus } from '@/lib/types';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -40,27 +41,64 @@ export default function DefectsPage() {
   const [solCommit, setSolCommit] = useState('');
   const [retestStatus, setRetestStatus] = useState<'passed' | 'failed'>('passed');
   const [retestNotes, setRetestNotes] = useState('');
+  const [actionError, setActionError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [detailLoading, setDetailLoading] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState('');
+  const detailRequest = useRef(0);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [d, cases, results, solutions, retests] = await Promise.all([
+      const [d, cases] = await Promise.all([
         api.getDefects(id),
         api.getTestCases(id),
-        api.getTestResults(),
-        api.getSolutions(),
-        api.getRetests(),
       ]);
       setDefects(d as any[]);
       setAllCases(cases as any[]);
-      setAllResults(results as any[]);
-      setAllSolutions(solutions as any[]);
-      setAllRetests(retests as any[]);
-    } catch {}
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : '加载失败，请重试。');
+    }
     setLoading(false);
   }, [id]);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  useEffect(() => {
+    detailRequest.current++;
+    setExpandedDefect(null);
+    setAllResults([]); setAllSolutions([]); setAllRetests([]);
+  }, [id]);
+
+  const loadDetail = async (defect: any) => {
+    if (!defect) return;
+    const request = ++detailRequest.current;
+    setDetailLoading(defect.id);
+    setDetailError('');
+    try {
+      const [results, solutions, retests] = await Promise.all([
+        defect.resultId ? api.getTestResultsPage({ resultId: defect.resultId, projectId: id, pageSize: 1 }).then(page => page.items) : Promise.resolve([]),
+        api.getSolutions(defect.id),
+        api.getRetests(defect.id),
+      ]);
+      if (request !== detailRequest.current) return;
+      setAllResults(previous => [...previous.filter(r => r.id !== defect.resultId), ...results]);
+      setAllSolutions(previous => [...previous.filter(s => s.defectId !== defect.id), ...solutions]);
+      setAllRetests(previous => [...previous.filter(r => r.defectId !== defect.id), ...retests]);
+    } catch (error) {
+      if (request !== detailRequest.current) return;
+      setDetailError(error instanceof Error ? error.message : '追溯详情加载失败，请重试。');
+    } finally {
+      if (request === detailRequest.current) setDetailLoading(null);
+    }
+  };
+
+  const toggleDetail = (defect: any) => {
+    if (expandedDefect === defect.id) { detailRequest.current++; setExpandedDefect(null); return; }
+    setExpandedDefect(defect.id);
+    setActionError('');
+    void loadDetail(defect);
+  };
 
   const caseMap = useMemo(() => {
     const m: Record<string, any> = {};
@@ -117,33 +155,51 @@ export default function DefectsPage() {
   const paged = filtered.slice((page - 1) * pageSize, page * pageSize);
 
   const handleAddSolution = async (defectId: string) => {
-    if (!solTitle.trim()) return;
-    await api.createSolution({
-      defectId, title: solTitle.trim(), rootCause: solRootCause,
-      fixDescription: solFix, fixCommitUrl: solCommit,
-    });
-    setShowSolution(null);
-    setSolTitle(''); setSolRootCause(''); setSolFix(''); setSolCommit('');
-    loadData();
+    if (!solTitle.trim() || saving) return;
+    setSaving(true); setActionError('');
+    try {
+      await api.createSolution({
+        defectId, title: solTitle.trim(), rootCause: solRootCause,
+        fixDescription: solFix, fixCommitUrl: solCommit,
+      });
+      setShowSolution(null);
+      setSolTitle(''); setSolRootCause(''); setSolFix(''); setSolCommit('');
+      await loadData();
+      await loadDetail(defects.find(d => d.id === defectId));
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : '保存失败，请重试。');
+    } finally { setSaving(false); }
   };
 
   const handleRetest = async (defectId: string) => {
     const defect = defects.find(d => d.id === defectId);
-    if (!defect) return;
-    const result = resultMap[defect.resultId];
-    await api.createRetest({
-      defectId, status: retestStatus, notes: retestNotes,
-      resultId: result?.id || '', runId: result?.runId || '',
-    });
-    setShowRetest(null);
-    setRetestNotes('');
-    loadData();
+    if (!defect || saving) return;
+    setSaving(true); setActionError('');
+    try {
+      const result = resultMap[defect.resultId];
+      await api.createRetest({
+        defectId, status: retestStatus, notes: retestNotes,
+        resultId: result?.id || '', runId: result?.runId || '',
+      });
+      setShowRetest(null);
+      setRetestNotes('');
+      await loadData();
+      await loadDetail(defect);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : '保存失败，请重试。');
+    } finally { setSaving(false); }
   };
 
   const handleStatusFlow = async (defect: any) => {
-    const next = defect.status === 'open' ? 'in_progress' : defect.status === 'in_progress' ? 'fixed' : defect.status === 'fixed' ? 'verified' : 'closed';
-    await api.updateDefect(defect.id, { status: next });
-    loadData();
+    const next = nextManualDefectStatus(defect.status);
+    if (!next || saving) return;
+    setSaving(true); setActionError('');
+    try {
+      await api.updateDefect(defect.id, { status: next });
+      await loadData();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : '状态更新失败，请重试。');
+    } finally { setSaving(false); }
   };
 
   const severityColor = (s: string) => {
@@ -191,6 +247,7 @@ export default function DefectsPage() {
 
   return (
     <div className="space-y-4">
+      {actionError && <p role="alert" className="text-sm text-red-600">{actionError}</p>}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">缺陷管理</h1>
@@ -273,12 +330,14 @@ export default function DefectsPage() {
                       <span>{new Date(defect.createdAt).toLocaleString('zh-CN')}</span>
                     </div>
 
-                    <Button variant="ghost" size="sm" onClick={() => setExpandedDefect(isExpanded ? null : defect.id)} className="text-xs mt-2 h-6 px-2">
+                    <Button variant="ghost" size="sm" onClick={() => toggleDetail(defect)} className="text-xs mt-2 h-6 px-2">
                       {isExpanded ? '收起' : '展开追溯链'} <ChevronRight className={`h-3 w-3 ml-1 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
                     </Button>
 
                     {isExpanded && (
                       <div className="mt-3 space-y-3 border-t pt-3">
+                        {detailLoading === defect.id && <p className="text-xs text-muted-foreground">正在加载追溯详情…</p>}
+                        {detailError && <p role="alert" className="text-xs text-red-600">{detailError}</p>}
                         <div className="space-y-2">
                           <div className="flex items-center gap-2 text-xs">
                             <div className="h-6 w-6 rounded-full bg-blue-100 flex items-center justify-center"><span className="text-[10px]">TC</span></div>
@@ -290,8 +349,13 @@ export default function DefectsPage() {
                                 {result?.status === 'passed' ? <CheckCircle2 className="h-3 w-3 text-green-600" /> : <XCircle className="h-3 w-3 text-red-600" />}
                               </div>
                               <span>执行结果: {result?.actualResult || result?.description || '-'}</span>
-                              {result?.errorLog && <span className="text-red-500 truncate max-w-xs">{result.errorLog.split('\n')[0]}</span>}
                             </div>
+                            {result?.errorLog && (
+                              <details className="mt-2 text-xs">
+                                <summary className="cursor-pointer text-red-600">查看完整错误日志</summary>
+                                <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-red-600">{result.errorLog}</pre>
+                              </details>
+                            )}
                           </div>
                           <div className="ml-3 border-l-2 border-dashed pl-3">
                             <div className="flex items-center gap-2 text-xs">
@@ -331,7 +395,7 @@ export default function DefectsPage() {
                         </div>
 
                         <div className="flex gap-2 pt-2 border-t">
-                          {(defect.status === 'open' || defect.status === 'in_progress') && !showSolution && (
+                          {(defect.status === 'open' || defect.status === 'in_progress' || defect.status === 'reopened') && !showSolution && (
                             <Button size="sm" variant="outline" onClick={() => setShowSolution(defect.id)} className="text-xs">
                               <Lightbulb className="h-3 w-3 mr-1" />添加解决方案
                             </Button>
@@ -341,9 +405,11 @@ export default function DefectsPage() {
                               <RotateCcw className="h-3 w-3 mr-1" />创建复测
                             </Button>
                           )}
-                          <Button size="sm" variant="ghost" onClick={() => handleStatusFlow(defect)} className="text-xs">
-                            流转状态 → {statusLabel(defect.status === 'open' ? 'in_progress' : defect.status === 'in_progress' ? 'fixed' : defect.status === 'fixed' ? 'verified' : 'closed')}
-                          </Button>
+                          {nextManualDefectStatus(defect.status) && (
+                            <Button size="sm" variant="ghost" disabled={saving} onClick={() => handleStatusFlow(defect)} className="text-xs">
+                              流转状态 → {statusLabel(nextManualDefectStatus(defect.status)!)}
+                            </Button>
+                          )}
                         </div>
 
                         {showSolution === defect.id && (
@@ -365,7 +431,7 @@ export default function DefectsPage() {
                               <Input value={solCommit} onChange={e => setSolCommit(e.target.value)} className="h-8 text-xs" placeholder="https://github.com/.../commit/..." />
                             </div>
                             <div className="flex gap-2">
-                              <Button size="sm" onClick={() => handleAddSolution(defect.id)} className="text-xs flex-1">保存方案</Button>
+                              <Button size="sm" onClick={() => handleAddSolution(defect.id)} disabled={saving || !solTitle.trim()} className="text-xs flex-1">保存方案</Button>
                               <Button size="sm" variant="ghost" onClick={() => setShowSolution(null)} className="text-xs">取消</Button>
                             </div>
                           </div>
@@ -388,7 +454,7 @@ export default function DefectsPage() {
                               <Textarea value={retestNotes} onChange={e => setRetestNotes(e.target.value)} className="text-xs" rows={2} placeholder="复测说明" />
                             </div>
                             <div className="flex gap-2">
-                              <Button size="sm" onClick={() => handleRetest(defect.id)} className="text-xs flex-1">提交复测</Button>
+                              <Button size="sm" onClick={() => handleRetest(defect.id)} disabled={saving} className="text-xs flex-1">提交复测</Button>
                               <Button size="sm" variant="ghost" onClick={() => setShowRetest(null)} className="text-xs">取消</Button>
                             </div>
                           </div>

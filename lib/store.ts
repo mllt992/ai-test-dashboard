@@ -116,6 +116,7 @@ function getSeedData(): StoreData {
       name: '第2轮回归测试',
       trigger: 'ai',
       environment: 'Chrome 120 / Windows 11',
+      status: 'completed',
       startedAt: now(),
       finishedAt: now(),
       createdBy: adminId,
@@ -319,7 +320,7 @@ function createTestRun(planId: string, projectId: string, name: string, trigger:
   if (!user) throw new Error('Not authenticated');
   const run: TestRun = {
     id: generateId(), planId, projectId, name, trigger, environment,
-    startedAt: now(), createdBy: user.id,
+    status: 'running', startedAt: now(), createdBy: user.id,
   };
   updateData(d => { d.testRuns.push(run); });
   return run;
@@ -328,7 +329,7 @@ function createTestRun(planId: string, projectId: string, name: string, trigger:
 function finishTestRun(id: string): void {
   updateData(d => {
     const r = d.testRuns.find(x => x.id === id);
-    if (r) r.finishedAt = now();
+    if (r) { r.status = 'completed'; r.finishedAt = now(); }
   });
 }
 

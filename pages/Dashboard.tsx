@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '@/lib/api';
-import { computeDashboardStats } from '@/lib/stats';
-import type { TestCase, TestResult, Defect } from '@/lib/types';
+import type { DashboardSummary } from '@/lib/dashboard';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line, Legend } from 'recharts';
 
@@ -10,78 +9,26 @@ const COLORS = ['#22c55e', '#ef4444', '#94a3b8', '#eab308'];
 
 export default function DashboardPage() {
   const { id } = useParams<{ id: string }>();
-  const [cases, setCases] = useState<TestCase[]>([]);
-  const [defects, setDefects] = useState<Defect[]>([]);
-  const [results, setResults] = useState<TestResult[]>([]);
+  const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [loading, setLoading] = useState(true);
-
+  const [loadError, setLoadError] = useState(false);
   useEffect(() => {
-    (async () => {
-      const [c, d, r] = await Promise.all([
-        api.getTestCases(id!),
-        api.getDefects(id!),
-        api.getTestResults(),
-      ]);
-      const typedCases = c as unknown as TestCase[];
-      const typedResults = r.filter((x: any) => typedCases.some(tc => tc.id === x.caseId)) as unknown as TestResult[];
-      setCases(typedCases);
-      setDefects(d as unknown as Defect[]);
-      setResults(typedResults);
-      setLoading(false);
-    })().catch(() => setLoading(false));
+    let active = true;
+    setLoading(true);
+    setLoadError(false);
+    api.getDashboard(id!).then(data => { if (active) setSummary(data); })
+      .catch(() => { if (active) setLoadError(true); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
   }, [id]);
-
   if (loading) return <div className="p-8 text-center text-muted-foreground">加载中...</div>;
-
-  const stats = computeDashboardStats(cases, results, defects);
-
+  if (loadError || !summary) return <div role="alert" className="p-8 text-center">统计加载失败，请重试。</div>;
+  const stats = summary;
   const statusData = [
-    { name: '通过', value: stats.passed },
-    { name: '失败', value: stats.failed },
-    { name: '跳过', value: stats.skipped },
-    { name: '阻塞', value: stats.blocked },
+    { name: '通过', value: stats.passed }, { name: '失败', value: stats.failed },
+    { name: '跳过', value: stats.skipped }, { name: '阻塞', value: stats.blocked },
   ].filter(d => d.value > 0);
-
-  const priorityData = (['P0', 'P1', 'P2', 'P3'] as const).map(p => {
-    const pCases = cases.filter(c => c.priority === p);
-    return {
-      name: p,
-      passed: pCases.filter(c => c.status === 'passed').length,
-      failed: pCases.filter(c => c.status === 'failed').length,
-      total: pCases.length,
-    };
-  });
-
-  const trendData = Array.from({ length: 7 }, (_, i) => {
-    const date = new Date();
-    date.setDate(date.getDate() - (6 - i));
-    const dayStr = date.toISOString().split('T')[0];
-    const dayResults = results.filter(r => (r.executedAt || '').startsWith(dayStr));
-    const passed = dayResults.filter(r => r.status === 'passed').length;
-    const total = dayResults.length;
-    return {
-      date: `${date.getMonth() + 1}/${date.getDate()}`,
-      passRate: total > 0 ? Math.round((passed / total) * 100) : 0,
-      count: total,
-    };
-  });
-
-  const durationData = [
-    { range: '<1s', count: results.filter(r => r.durationMs < 1000).length },
-    { range: '1-3s', count: results.filter(r => r.durationMs >= 1000 && r.durationMs < 3000).length },
-    { range: '3-5s', count: results.filter(r => r.durationMs >= 3000 && r.durationMs < 5000).length },
-    { range: '5s+', count: results.filter(r => r.durationMs >= 5000).length },
-  ];
-
-  const topFailed = cases
-    .filter(c => c.status === 'failed')
-    .map(c => {
-      const caseResults = results.filter(r => r.caseId === c.id);
-      const failCount = caseResults.filter(r => r.status === 'failed').length;
-      return { name: c.name, failCount, total: caseResults.length };
-    })
-    .sort((a, b) => b.failCount - a.failCount)
-    .slice(0, 5);
+  const { priorityData, trendData, durationData, topFailed } = summary;
 
   return (
     <div className="space-y-6">

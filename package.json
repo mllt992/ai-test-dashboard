@@ -13,7 +13,9 @@
     "build": "tsc --noEmit && node scripts/build.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "dev:function": "deno run --allow-net=127.0.0.1:8000 dev/function-local.ts",
-    "check:function": "deno check functions/index.ts"
+    "check:function": "deno check --node-modules-dir=none functions/index.ts dev/function-local.ts",
+    "test": "node --test tests/*.test.mjs scripts/api-contract.test.mjs",
+    "test:postgres": "node --test tests/postgres.test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
@@ -40,11 +42,14 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",
+    "pg": "^8.23.1",
     "tailwindcss": "4.2.1",
     "tw-animate-css": "^1.4.0",
     "typescript": "5.9.3",

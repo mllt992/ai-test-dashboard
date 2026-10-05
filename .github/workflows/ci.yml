@@ -1,0 +1,48 @@
+name: Dashboard checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: dashboard_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - "127.0.0.1:54329:5432"
+        options: >-
+          --health-cmd "pg_isready -U postgres -d dashboard_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.22.0"
+          cache: npm
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: "2.7.9"
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
+      - name: PostgreSQL transactions with independent connections
+        run: npm run test:postgres
+        env:
+          PG_TEST_URL: postgresql://postgres@127.0.0.1:54329/dashboard_test
+          DASHBOARD_TEST_DATABASE: "1"
+      - run: npm run check:function
+      - run: npm run build
+      - run: git diff --exit-code

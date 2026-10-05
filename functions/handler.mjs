@@ -1,7 +1,16 @@
+import { handleMcp as handleMcpProtocol } from "./mcp.mjs";
+import { BusinessError, submitTestResult, addSolution, createRetest } from "./business.mjs";
 const json = (body, status = 200) =>
   Response.json(body, { status, headers: { "cache-control": "no-store" } });
 
 const error = (code, status = 400) => json({ error: code }, status);
+
+async function businessResponse(operation) {
+  try { return json({ item: await operation() }, 201); }
+  catch (err) {
+    return err instanceof BusinessError ? error(err.code, err.httpStatus) : error("database_request_failed", 503);
+  }
+}
 
 function parseBody(request) {
   return request.json().catch(() => null);
@@ -140,8 +149,9 @@ async function handleTestCases({ request, supabase }) {
     if (!body?.id) return error("missing_id");
     const { id, ...fields } = body;
     fields.updated_at = now();
+    if (["status", "latest_result_at", "latest_result_id", "latestResultAt", "latestResultId"].some(key => key in fields)) return error("case_state_requires_result", 409);
     const { data, error: err } = await supabase.from("test_cases").update(fields).eq("id", id).select().maybeSingle();
-    if (err) return error("database_request_failed", 503);
+    if (err) return error(err.code === "23514" ? "invalid_state_transition" : "database_request_failed", err.code === "23514" ? 409 : 503);
     return json({ item: data });
   }
   if (action === "delete" && request.method === "DELETE") {
@@ -172,7 +182,7 @@ async function handleTestRuns({ request, supabase }) {
       id: uuid(), project_id: body.projectId, plan_id: body.planId || null,
       name: body.name, trigger_type: body.triggerType || "manual",
       environment: body.environment || "", status: "running",
-      created_at: now(), updated_at: now(),
+      finished_at: null, created_at: now(), updated_at: now(),
     };
     const { data, error: err } = await supabase.from("test_runs").insert(row).select().single();
     if (err) return error("database_request_failed", 503);
@@ -181,10 +191,13 @@ async function handleTestRuns({ request, supabase }) {
   if (action === "update" && request.method === "PATCH") {
     const body = await parseBody(request);
     if (!body?.id) return error("missing_id");
+    if (body.status != null && !["running", "completed"].includes(body.status)) return error("invalid_run_status");
+    if (Object.keys(body).some(key => !["id", "name", "environment", "status"].includes(key))) return error("invalid_fields");
     const { id, ...fields } = body;
     fields.updated_at = now();
     const { data, error: err } = await supabase.from("test_runs").update(fields).eq("id", id).select().maybeSingle();
-    if (err) return error("database_request_failed", 503);
+    if (err) return error(err.code === "23514" ? "invalid_state_transition" : "database_request_failed", err.code === "23514" ? 409 : 503);
+    if (!data) return error("not_found", 404);
     return json({ item: data });
   }
   if (action === "delete" && request.method === "DELETE") {
@@ -203,25 +216,25 @@ async function handleTestResults({ request, supabase }) {
   const runId = getParams(request.url).get("runId");
   const caseId = getParams(request.url).get("caseId");
   if (action === "list") {
-    let q = supabase.from("test_results").select("*").order("created_at", { ascending: false });
-    if (runId) q = q.eq("run_id", runId);
-    if (caseId) q = q.eq("case_id", caseId);
-    const { data, error: err } = await q;
-    if (err) return error("database_request_failed", 503);
-    return json({ items: data || [] });
+    const params = getParams(request.url);
+    const projectId = params.get("projectId");
+    const resultId = params.get("resultId");
+    const offset = Number(params.get("offset") ?? 0);
+    const pageSize = Number(params.get("pageSize") ?? 100);
+    const validId = value => !value || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+    if (![projectId, runId, caseId, resultId].every(validId)) return error("invalid_id");
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 200) return error("invalid_pagination");
+    const { data, error: err } = await supabase.rpc("dashboard_result_page", {
+      p_project_id: projectId || null, p_run_id: runId || null, p_case_id: caseId || null,
+      p_offset: offset, p_page_size: pageSize, p_result_id: resultId || null,
+    });
+    if (err || !data) return error("database_request_failed", 503);
+    return json(data);
   }
   if (action === "create" && request.method === "POST") {
     const body = await parseBody(request);
     if (!body?.runId || !body?.caseId) return error("missing_fields");
-    const row = {
-      id: uuid(), run_id: body.runId, case_id: body.caseId,
-      status: body.status || "passed", description: body.description || "",
-      duration_ms: body.durationMs || 0, screenshots: body.screenshots || [],
-      created_at: now(),
-    };
-    const { data, error: err } = await supabase.from("test_results").insert(row).select().single();
-    if (err) return error("database_request_failed", 503);
-    return json({ item: data }, 201);
+    return businessResponse(() => submitTestResult(supabase, body));
   }
   if (action === "delete" && request.method === "DELETE") {
     const id = getParams(request.url).get("id");
@@ -263,7 +276,8 @@ async function handleDefects({ request, supabase }) {
     const { id, ...fields } = body;
     fields.updated_at = now();
     const { data, error: err } = await supabase.from("defects").update(fields).eq("id", id).select().maybeSingle();
-    if (err) return error("database_request_failed", 503);
+    if (err) return error(err.code === "23514" ? "invalid_state_transition" : "database_request_failed", err.code === "23514" ? 409 : 503);
+    if (!data) return error("not_found", 404);
     return json({ item: data });
   }
   if (action === "delete" && request.method === "DELETE") {
@@ -290,14 +304,7 @@ async function handleSolutions({ request, supabase }) {
   if (action === "create" && request.method === "POST") {
     const body = await parseBody(request);
     if (!body?.defectId || !body?.title) return error("missing_fields");
-    const row = {
-      id: uuid(), defect_id: body.defectId, title: body.title,
-      root_cause: body.rootCause || "", fix_description: body.fixDescription || "",
-      commit_url: body.commitUrl || "", created_at: now(),
-    };
-    const { data, error: err } = await supabase.from("solutions").insert(row).select().single();
-    if (err) return error("database_request_failed", 503);
-    return json({ item: data }, 201);
+    return businessResponse(() => addSolution(supabase, body));
   }
   if (action === "delete" && request.method === "DELETE") {
     const id = getParams(request.url).get("id");
@@ -323,13 +330,7 @@ async function handleRetests({ request, supabase }) {
   if (action === "create" && request.method === "POST") {
     const body = await parseBody(request);
     if (!body?.defectId) return error("missing_fields");
-    const row = {
-      id: uuid(), defect_id: body.defectId, status: body.status || "passed",
-      notes: body.notes || "", created_at: now(),
-    };
-    const { data, error: err } = await supabase.from("retests").insert(row).select().single();
-    if (err) return error("database_request_failed", 503);
-    return json({ item: data }, 201);
+    return businessResponse(() => createRetest(supabase, body));
   }
   return error("not_found", 404);
 }
@@ -373,200 +374,24 @@ async function handleDashboard({ request, supabase }) {
   const pid = getParams(request.url).get("projectId");
   if (action !== "stats") return error("not_found", 404);
 
-  try {
-    const results = await Promise.all([
-      supabase.from("test_results").select("id,status,case_id,created_at,duration_ms", { count: "exact" }).limit(1),
-      supabase.from("defects").select("id,status", { count: "exact" }).limit(1),
-      supabase.from("test_cases").select("id,status,priority", { count: "exact" }).limit(1),
-    ]);
-
-    const totalResults = results[0].count ?? 0;
-    const totalDefects = results[1].count ?? 0;
-    const totalCases = results[2].count ?? 0;
-
-    // Get status distribution
-    const { data: statusData } = await supabase.from("test_cases").select("status").eq("project_id", pid || "");
-    const statusDist = {};
-    (statusData || []).forEach(c => { statusDist[c.status] = (statusDist[c.status] || 0) + 1; });
-
-    // Get priority distribution
-    const { data: priorityData } = await supabase.from("test_cases").select("status,priority").eq("project_id", pid || "");
-    const priorityDist = {};
-    (priorityData || []).forEach(c => {
-      if (!priorityDist[c.priority]) priorityDist[c.priority] = { passed: 0, failed: 0 };
-      if (c.status === "passed") priorityDist[c.priority].passed++;
-      else if (c.status === "failed") priorityDist[c.priority].failed++;
-    });
-
-    // Get failed top cases
-    const { data: failedResults } = await supabase.from("test_results").select("case_id").eq("status", "failed");
-    const failCounts = {};
-    (failedResults || []).forEach(r => { failCounts[r.case_id] = (failCounts[r.case_id] || 0) + 1; });
-    const topFailed = Object.entries(failCounts).sort((a, b) => b[1] - a[1]).slice(0, 5);
-
-    return json({
-      totalResults, totalDefects, totalCases,
-      statusDistribution: statusDist,
-      priorityDistribution: priorityDist,
-      topFailedCases: topFailed.map(([caseId, count]) => ({ caseId, count })),
-    });
-  } catch {
-    return error("database_request_failed", 503);
-  }
+  if (pid && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pid)) return error("invalid_id");
+  const { data, error: err } = await supabase.rpc("dashboard_stats", { p_project_id: pid || null });
+  if (err || !data) return error("database_request_failed", 503);
+  return json(data);
 }
 
 // --- MCP Endpoint ---
-const MCP_TOOLS = [
-  { name: "create_project", description: "创建项目", params: ["name", "description"] },
-  { name: "list_projects", description: "列出所有项目", params: [] },
-  { name: "create_test_plan", description: "创建测试计划", params: ["projectId", "name"] },
-  { name: "add_test_cases", description: "添加测试用例", params: ["projectId", "cases"] },
-  { name: "create_test_run", description: "创建执行批次", params: ["projectId", "name"] },
-  { name: "submit_test_result", description: "提交测试结果", params: ["runId", "caseId", "status"] },
-  { name: "upload_screenshots", description: "上传截图", params: ["resultId", "screenshots"] },
-  { name: "create_defect", description: "创建缺陷", params: ["projectId", "title", "severity"] },
-  { name: "add_solution", description: "添加解决方案", params: ["defectId", "title"] },
-  { name: "create_retest", description: "创建复测", params: ["defectId", "status"] },
-  { name: "link_task", description: "关联外部任务", params: ["projectId", "title", "source"] },
-  { name: "get_dashboard", description: "获取看板数据", params: ["projectId"] },
-  { name: "get_traceability", description: "获取追溯链", params: ["defectId"] },
-];
-
-async function handleMcp({ request, supabase }) {
-  const body = await parseBody(request);
-  if (!body || body.jsonrpc !== "2.0") return error("invalid_mcp_request", 400);
-
-  const { method, params = {}, id } = body;
-
-  if (method === "tools/list") {
-    return json({
-      jsonrpc: "2.0", id,
-      result: { tools: MCP_TOOLS.map(t => ({ name: t.name, description: t.description, inputSchema: { type: "object", properties: Object.fromEntries(t.params.map(p => [p, { type: "string" }])) } })) },
-    });
-  }
-
-  if (method === "tools/call") {
-    const toolName = params?.name;
-    const args = params?.arguments || {};
-    const tool = MCP_TOOLS.find(t => t.name === toolName);
-    if (!tool) return json({ jsonrpc: "2.0", id, error: { code: -32601, message: `Unknown tool: ${toolName}` } });
-
-    try {
-      let result;
-      switch (toolName) {
-        case "create_project": {
-          const row = { id: uuid(), name: args.name, description: args.description || "", status: "active", tags: [], created_at: now(), updated_at: now() };
-          const { data, error: err } = await supabase.from("projects").insert(row).select().single();
-          if (err) throw new Error("db_error");
-          result = data;
-          break;
-        }
-        case "list_projects": {
-          const { data } = await supabase.from("projects").select("*").order("created_at", { ascending: false });
-          result = data || [];
-          break;
-        }
-        case "create_test_plan": {
-          const row = { id: uuid(), project_id: args.projectId, name: args.name, description: args.description || "", status: "draft", created_at: now(), updated_at: now() };
-          const { data, error: err } = await supabase.from("test_plans").insert(row).select().single();
-          if (err) throw new Error("db_error");
-          result = data;
-          break;
-        }
-        case "add_test_cases": {
-          const cases = Array.isArray(args.cases) ? args.cases : [args];
-          const rows = cases.map(c => ({
-            id: uuid(), project_id: args.projectId, plan_id: args.planId || null,
-            name: c.name, description: c.description || "", precondition: c.precondition || "",
-            steps: c.steps || "", expected: c.expected || "", priority: c.priority || "P1",
-            sort_order: c.sortOrder ?? 0, status: "pending", created_at: now(), updated_at: now(),
-          }));
-          const { data, error: err } = await supabase.from("test_cases").insert(rows).select();
-          if (err) throw new Error("db_error");
-          result = data || [];
-          break;
-        }
-        case "create_test_run": {
-          const row = { id: uuid(), project_id: args.projectId, plan_id: args.planId || null, name: args.name, trigger_type: "ai", environment: args.environment || "", status: "running", created_at: now(), updated_at: now() };
-          const { data, error: err } = await supabase.from("test_runs").insert(row).select().single();
-          if (err) throw new Error("db_error");
-          result = data;
-          break;
-        }
-        case "submit_test_result": {
-          const row = { id: uuid(), run_id: args.runId, case_id: args.caseId, status: args.status || "passed", description: args.description || "", duration_ms: args.durationMs || 0, screenshots: args.screenshots || [], created_at: now() };
-          const { data, error: err } = await supabase.from("test_results").insert(row).select().single();
-          if (err) throw new Error("db_error");
-          result = data;
-          break;
-        }
-        case "upload_screenshots": {
-          const { data, error: err } = await supabase.from("test_results").update({ screenshots: args.screenshots }).eq("id", args.resultId).select().maybeSingle();
-          if (err) throw new Error("db_error");
-          result = data;
-          break;
-        }
-        case "create_defect": {
-          const row = { id: uuid(), project_id: args.projectId, result_id: args.resultId || null, case_id: args.caseId || null, title: args.title, description: args.description || "", severity: args.severity || "major", status: "open", created_at: now(), updated_at: now() };
-          const { data, error: err } = await supabase.from("defects").insert(row).select().single();
-          if (err) throw new Error("db_error");
-          result = data;
-          break;
-        }
-        case "add_solution": {
-          const row = { id: uuid(), defect_id: args.defectId, title: args.title, root_cause: args.rootCause || "", fix_description: args.fixDescription || "", commit_url: args.commitUrl || "", created_at: now() };
-          const { data, error: err } = await supabase.from("solutions").insert(row).select().single();
-          if (err) throw new Error("db_error");
-          result = data;
-          break;
-        }
-        case "create_retest": {
-          const row = { id: uuid(), defect_id: args.defectId, status: args.status || "passed", notes: args.notes || "", created_at: now() };
-          const { data, error: err } = await supabase.from("retests").insert(row).select().single();
-          if (err) throw new Error("db_error");
-          result = data;
-          break;
-        }
-        case "link_task": {
-          const row = { id: uuid(), project_id: args.projectId, title: args.title, source: args.source || "manual", external_id: args.externalId || "", external_url: args.externalUrl || "", created_at: now() };
-          const { data, error: err } = await supabase.from("external_tasks").insert(row).select().single();
-          if (err) throw new Error("db_error");
-          result = data;
-          break;
-        }
-        case "get_dashboard": {
-          const { data: cases } = await supabase.from("test_cases").select("status,priority").eq("project_id", args.projectId || "");
-          const { data: defects } = await supabase.from("defects").select("status").eq("project_id", args.projectId || "");
-          const { data: results } = await supabase.from("test_results").select("status").eq("project_id", args.projectId || "");
-          result = { cases: cases || [], defects: defects || [], results: results || [] };
-          break;
-        }
-        case "get_traceability": {
-          const { data: defect } = await supabase.from("defects").select("*").eq("id", args.defectId).maybeSingle();
-          const { data: solutions } = await supabase.from("solutions").select("*").eq("defect_id", args.defectId);
-          const { data: retests } = await supabase.from("retests").select("*").eq("defect_id", args.defectId);
-          result = { defect, solutions: solutions || [], retests: retests || [] };
-          break;
-        }
-        default:
-          return json({ jsonrpc: "2.0", id, error: { code: -32601, message: `Unhandled tool: ${toolName}` } });
-      }
-      return json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] } });
-    } catch {
-      return json({ jsonrpc: "2.0", id, error: { code: -32000, message: "Tool execution failed" } });
-    }
-  }
-
-  return json({ jsonrpc: "2.0", id, error: { code: -32601, message: `Unknown method: ${method}` } });
+// Tool dispatch reuses REST behavior, including its atomic business transitions.
+async function handleMcp(context) {
+  return handleMcpProtocol({ ...context, dispatch: handleApp });
 }
-
 // --- Main Router ---
 export async function handleApp({ request, supabase }) {
   const url = new URL(request.url);
   const path = url.pathname;
 
   // MCP endpoint
-  if (path.endsWith("/mcp") && request.method === "POST") {
+  if (path.endsWith("/mcp")) {
     return handleMcp({ request, supabase });
   }
 
