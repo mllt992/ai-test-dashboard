@@ -30,7 +30,9 @@
     "components",
     "hooks",
     "lib",
-    "vite.config.ts"
+    "vite.config.ts",
+    "pages",
+    "store"
   ],
   "exclude": [
     "node_modules",

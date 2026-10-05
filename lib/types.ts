@@ -77,6 +77,7 @@ export interface TestRun {
   name: string;
   trigger: 'manual' | 'ai' | 'ci';
   environment: string;
+  status: 'running' | 'completed';
   startedAt: string;
   finishedAt?: string;
   createdBy: string;
@@ -105,6 +106,17 @@ export interface Screenshot {
 
 export type DefectSeverity = 'critical' | 'major' | 'minor' | 'trivial';
 export type DefectStatus = 'open' | 'in_progress' | 'fixed' | 'verified' | 'closed' | 'reopened';
+
+// Verification comes from a retest; it cannot be skipped by the manual button.
+export function nextManualDefectStatus(status: DefectStatus): DefectStatus | undefined {
+  switch (status) {
+    case 'open':
+    case 'reopened': return 'in_progress';
+    case 'in_progress': return 'fixed';
+    case 'verified': return 'closed';
+    default: return undefined;
+  }
+}
 
 export interface Defect {
   id: string;

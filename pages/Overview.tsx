@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api } from '@/lib/api';
-import { computeDashboardStats } from '@/lib/stats';
+import type { DashboardStats } from '@/lib/stats';
 import { useAuth, useProject } from '@/store/context';
-import type { TestCase, TestResult, Defect } from '@/lib/types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
@@ -12,31 +11,31 @@ import { FolderOpen, FlaskConical, CheckCircle2, XCircle, Bug, Clock } from 'luc
 export default function OverviewPage() {
   const { user } = useAuth();
   const { projects } = useProject();
-  const [statsArr, setStatsArr] = useState<{ project: any; stats: ReturnType<typeof computeDashboardStats> }[]>([]);
+  const [statsArr, setStatsArr] = useState<{ project: any; stats: DashboardStats }[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
-    if (projects.length === 0) { setLoading(false); return; }
-    Promise.all(
-      projects.map(async p => {
-        const [cases, allResults, defects] = await Promise.all([
-          api.getTestCases(p.id),
-          api.getTestResults(),
-          api.getDefects(p.id),
-        ]);
-        const pResults = allResults.filter((r: any) => cases.some((c: any) => c.id === r.caseId));
-        return { project: p, stats: computeDashboardStats(cases as TestCase[], pResults as TestResult[], defects as Defect[]) };
-      })
-    ).then(setStatsArr).finally(() => setLoading(false));
+    let active = true;
+    if (projects.length === 0) { setStatsArr([]); setLoading(false); return; }
+    setLoading(true);
+    setLoadError(false);
+    Promise.all(projects.map(async p => ({ project: p, stats: await api.getDashboard(p.id) })))
+      .then(data => { if (active) setStatsArr(data); })
+      .catch(() => { if (active) setLoadError(true); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
   }, [projects]);
 
   if (loading) return <div className="p-8 text-center text-muted-foreground">加载中...</div>;
+
+  if (loadError) return <div role="alert" className="p-8 text-center">统计加载失败，请重试。</div>;
 
   const totalCases = statsArr.reduce((s, x) => s + x.stats.caseCount, 0);
   const totalPassed = statsArr.reduce((s, x) => s + x.stats.passed, 0);
   const totalFailed = statsArr.reduce((s, x) => s + x.stats.failed, 0);
   const totalDefects = statsArr.reduce((s, x) => s + x.stats.openDefects, 0);
-  const overallRate = totalCases > 0 ? Math.round((totalPassed / (totalPassed + totalFailed)) * 1000) / 10 : 0;
+  const overallRate = totalCases > 0 ? Math.round((totalPassed / totalCases) * 1000) / 10 : 0;
 
   const statCards = [
     { label: '项目总数', value: projects.length, icon: FolderOpen, iconColor: 'text-blue-600', bgLight: 'bg-blue-50' },

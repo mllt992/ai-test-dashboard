@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { api } from '@/lib/api';
+import { api, MAX_ERROR_LOG_LENGTH } from '@/lib/api';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -29,6 +29,9 @@ export default function TestRunsPage() {
   const [resultActual, setResultActual] = useState('');
   const [resultError, setResultError] = useState('');
   const [resultDuration, setResultDuration] = useState('1000');
+  const [resultSaveError, setResultSaveError] = useState('');
+  const [savingResult, setSavingResult] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   const [search, setSearch] = useState('');
   const [filterTrigger, setFilterTrigger] = useState('all');
@@ -43,7 +46,7 @@ export default function TestRunsPage() {
       const [r, p, results, cases] = await Promise.all([
         api.getTestRuns(id),
         api.getTestPlans(id),
-        api.getTestResults(),
+        api.getTestResults(undefined, undefined, id),
         api.getTestCases(id),
       ]);
       setRuns(r as any[]);
@@ -51,7 +54,10 @@ export default function TestRunsPage() {
       setAllResults(results as any[]);
       setAllCases(cases as any[]);
       if (p.length > 0 && !planId) setPlanId(p[0].id);
-    } catch {}
+      setLoadError('');
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : '加载失败，请重试。');
+    }
     setLoading(false);
   }, [id]);
 
@@ -66,8 +72,8 @@ export default function TestRunsPage() {
     if (filterTrigger !== 'all') result = result.filter(r => r.trigger === filterTrigger);
     if (filterPlan !== 'all') result = result.filter(r => r.planId === filterPlan);
     if (filterStatus !== 'all') {
-      if (filterStatus === 'finished') result = result.filter(r => !!r.finishedAt);
-      else result = result.filter(r => !r.finishedAt);
+      if (filterStatus === 'finished') result = result.filter(r => r.status === 'completed');
+      else result = result.filter(r => r.status === 'running');
     }
     result.sort((a, b) => new Date(b.startedAt || b.createdAt).getTime() - new Date(a.startedAt || a.createdAt).getTime());
     return result;
@@ -77,8 +83,8 @@ export default function TestRunsPage() {
 
   const counts = useMemo(() => ({
     total: runs.length,
-    running: runs.filter(r => !r.finishedAt).length,
-    finished: runs.filter(r => !!r.finishedAt).length,
+    running: runs.filter(r => r.status === 'running').length,
+    finished: runs.filter(r => r.status === 'completed').length,
     manual: runs.filter(r => r.trigger === 'manual').length,
     ai: runs.filter(r => r.trigger === 'ai').length,
     ci: runs.filter(r => r.trigger === 'ci').length,
@@ -117,15 +123,24 @@ export default function TestRunsPage() {
   };
 
   const handleSubmitResult = async (runId: string) => {
-    if (!resultCaseId) return;
-    await api.createTestResult({
-      runId, caseId: resultCaseId, status: resultStatus,
-      actualResult: resultActual, description: resultActual,
-      durationMs: parseInt(resultDuration) || 0,
-    });
-    setShowResult(null);
-    setResultCaseId(''); setResultActual(''); setResultError(''); setResultDuration('1000');
-    loadData();
+    if (!resultCaseId || savingResult) return;
+    setSavingResult(true);
+    setResultSaveError('');
+    try {
+      await api.createTestResult({
+        runId, caseId: resultCaseId, status: resultStatus,
+        actualResult: resultActual, description: resultActual,
+        errorLog: resultError,
+        durationMs: parseInt(resultDuration) || 0,
+      });
+      setShowResult(null);
+      setResultCaseId(''); setResultActual(''); setResultError(''); setResultDuration('1000');
+      await loadData();
+    } catch (error) {
+      setResultSaveError(error instanceof Error && error.message.includes(String(MAX_ERROR_LOG_LENGTH)) ? error.message : '保存失败，输入已保留，请稍后重试。');
+    } finally {
+      setSavingResult(false);
+    }
   };
 
   const statusIcon = (s: string) => {
@@ -141,6 +156,7 @@ export default function TestRunsPage() {
 
   return (
     <div className="space-y-4">
+      {loadError && <p role="alert" className="text-sm text-red-600">{loadError}</p>}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">测试执行</h1>
@@ -249,7 +265,7 @@ export default function TestRunsPage() {
                     </p>
                   </div>
                   <Badge variant="outline" className="text-[10px]">
-                    {run.finishedAt ? '已完成' : '进行中'}
+                    {run.status === 'completed' ? '已完成' : '进行中'}
                   </Badge>
                 </div>
                 <div className="flex items-center gap-4 text-xs text-muted-foreground mb-3">
@@ -257,17 +273,27 @@ export default function TestRunsPage() {
                   <span className="text-red-600">{failed} 失败</span>
                   <span>共 {results.length} 条结果</span>
                   <span className="ml-auto">{new Date(run.startedAt || run.createdAt).toLocaleString('zh-CN')}</span>
+                  {run.status === 'completed' && run.finishedAt && <span>完成于 {new Date(run.finishedAt).toLocaleString('zh-CN')}</span>}
                 </div>
                 <div className="space-y-1.5">
                   {results.map((r: any) => {
                     const tc = caseMap[r.caseId];
                     const screenshots = r.screenshots || [];
                     return (
-                      <div key={r.id} className="flex items-center gap-2 p-2 rounded-lg bg-muted/30 text-xs">
+                      <div key={r.id} className="p-2 rounded-lg bg-muted/30 text-xs">
+                        <div className="flex items-center gap-2">
                         {statusIcon(r.status)}
                         <span className="font-medium flex-1 truncate">{tc?.name ?? '未知用例'}</span>
                         <span className="text-muted-foreground">{r.durationMs}ms</span>
                         {screenshots.length > 0 && <Camera className="h-3 w-3 text-muted-foreground" />}
+                        </div>
+                        {(r.actualResult || r.errorLog) && (
+                          <details className="mt-2">
+                            <summary className="cursor-pointer text-muted-foreground">查看结果详情</summary>
+                            {r.actualResult && <p className="mt-2 whitespace-pre-wrap break-words">{r.actualResult}</p>}
+                            {r.errorLog && <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-red-600">{r.errorLog}</pre>}
+                          </details>
+                        )}
                       </div>
                     );
                   })}
@@ -279,6 +305,7 @@ export default function TestRunsPage() {
                 </div>
                 {showResult === run.id && (
                   <div className="mt-3 p-3 border rounded-lg space-y-3 bg-muted/20">
+                    {resultSaveError && <p role="alert" className="text-xs text-red-600">{resultSaveError}</p>}
                     <div className="space-y-1.5">
                       <label className="text-xs font-medium">选择用例 *</label>
                       <Select value={resultCaseId} onValueChange={setResultCaseId}>
@@ -309,7 +336,8 @@ export default function TestRunsPage() {
                     {resultStatus === 'failed' && (
                       <div className="space-y-1.5">
                         <label className="text-xs font-medium">错误日志</label>
-                        <Textarea value={resultError} onChange={e => setResultError(e.target.value)} className="text-xs font-mono" rows={2} placeholder="错误信息..." />
+                        <Textarea value={resultError} onChange={e => setResultError(e.target.value)} aria-describedby="error-log-limit" className="text-xs font-mono" rows={2} placeholder="错误信息..." />
+                        <p id="error-log-limit" className="text-xs text-muted-foreground">{Array.from(resultError).length} / {MAX_ERROR_LOG_LENGTH}</p>
                       </div>
                     )}
                     <div className="space-y-1.5">
@@ -317,7 +345,7 @@ export default function TestRunsPage() {
                       <Input value={resultDuration} onChange={e => setResultDuration(e.target.value)} className="h-8 text-xs" type="number" />
                     </div>
                     <div className="flex gap-2">
-                      <Button size="sm" onClick={() => handleSubmitResult(run.id)} className="text-xs flex-1">提交</Button>
+                      <Button size="sm" onClick={() => handleSubmitResult(run.id)} disabled={savingResult || !resultCaseId} className="text-xs flex-1">提交</Button>
                       <Button size="sm" variant="ghost" onClick={() => setShowResult(null)} className="text-xs">取消</Button>
                     </div>
                   </div>

@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '@/lib/api';
-import { computeDashboardStats } from '@/lib/stats';
+import type { DashboardStats } from '@/lib/stats';
 import { useProject } from '@/store/context';
-import type { TestCase, TestResult, Defect, TestPlan } from '@/lib/types';
+import type { TestCase, Defect, TestPlan } from '@/lib/types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
@@ -14,33 +14,39 @@ export default function ProjectOverviewPage() {
   const { id } = useParams<{ id: string }>();
   const { currentProject } = useProject();
   const [project, setProject] = useState<any>(null);
-  const [stats, setStats] = useState<ReturnType<typeof computeDashboardStats> | null>(null);
+  const [stats, setStats] = useState<DashboardStats | null>(null);
   const [plans, setPlans] = useState<TestPlan[]>([]);
   const [defects, setDefects] = useState<Defect[]>([]);
   const [planCases, setPlanCases] = useState<Record<string, TestCase[]>>({});
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
+    setLoading(true);
+    setLoadError(false);
+    setProject(null);
+    let active = true;
     (async () => {
       const p = currentProject?.id === id ? currentProject : await api.getProject(id!);
+      if (!active) return;
       if (!p) { setLoading(false); return; }
       setProject(p);
 
-      const [cases, allResults, defectList, planList] = await Promise.all([
+      const [cases, summary, defectList, planList] = await Promise.all([
         api.getTestCases(id!),
-        api.getTestResults(),
+        api.getDashboard(id!),
         api.getDefects(id!),
         api.getTestPlans(id!),
       ]);
 
       const typedCases = cases as unknown as TestCase[];
-      const typedResults = allResults.filter((r: any) => typedCases.some(c => c.id === r.caseId)) as unknown as TestResult[];
       const typedDefects = defectList as unknown as Defect[];
       const typedPlans = planList as unknown as TestPlan[];
 
+      if (!active) return;
       setDefects(typedDefects);
       setPlans(typedPlans);
-      setStats(computeDashboardStats(typedCases, typedResults, typedDefects, typedPlans.length));
+      setStats(summary);
 
       const caseMap: Record<string, TestCase[]> = {};
       for (const plan of typedPlans) {
@@ -48,10 +54,12 @@ export default function ProjectOverviewPage() {
       }
       setPlanCases(caseMap);
       setLoading(false);
-    })().catch(() => setLoading(false));
+    })().catch(() => { if (active) { setLoadError(true); setLoading(false); } });
+    return () => { active = false; };
   }, [id, currentProject]);
 
   if (loading) return <div className="p-8 text-center text-muted-foreground">加载中...</div>;
+  if (loadError) return <div role="alert" className="p-8 text-center">统计加载失败，请重试。</div>;
   if (!project) return <div className="p-8 text-center text-muted-foreground">项目不存在</div>;
 
   const severityColor = (s: string) => {

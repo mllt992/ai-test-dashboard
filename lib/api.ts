@@ -1,4 +1,56 @@
+import type { TestResult, TestRun } from './types';
+
 const API_BASE = "/functions/v1/app";
+export const MAX_ERROR_LOG_LENGTH = 65536;
+
+export interface TestResultsQuery {
+  resultId?: string;
+  runId?: string;
+  caseId?: string;
+  projectId?: string;
+  offset?: number;
+  pageSize?: number;
+}
+
+function normalizeRun(item: Record<string, unknown>): TestRun {
+  const run = toCamel(item);
+  return {
+    ...run,
+    trigger: run.triggerType || run.trigger || 'manual',
+    startedAt: run.startedAt || run.createdAt,
+    // A metadata update is not completion. Only the lifecycle timestamp counts.
+    finishedAt: run.status === 'completed' ? run.finishedAt || undefined : undefined,
+  } as TestRun;
+}
+
+function normalizeResult(item: Record<string, unknown>): TestResult {
+  const result = toCamel(item);
+  return {
+    ...result,
+    actualResult: result.description ?? result.actualResult ?? '',
+    errorLog: result.errorLog ?? '',
+    durationMs: result.durationMs ?? 0,
+    executedAt: result.executedAt || result.createdAt,
+    executedBy: result.executedBy || '',
+  } as TestResult;
+}
+
+async function getTestResultsPage(query: TestResultsQuery = {}) {
+  const params = new URLSearchParams({
+    action: 'result_list',
+    offset: String(query.offset ?? 0),
+    pageSize: String(query.pageSize ?? 100),
+  });
+  for (const key of ['runId', 'caseId', 'projectId', 'resultId'] as const) {
+    if (query[key]) params.set(key, query[key]);
+  }
+  const res = await requestJson(`${API_BASE}?${params}`);
+  return {
+    items: (res.items as Record<string, unknown>[]).map(normalizeResult),
+    total: res.total as number,
+    nextOffset: res.nextOffset as number | null,
+  };
+}
 
 function toCamel(obj: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -133,12 +185,7 @@ export const api = {
 
   getTestRuns: async (projectId?: string) => {
     const res = await requestJson(`${API_BASE}?action=run_list${projectId ? `&projectId=${projectId}` : ""}`);
-    return toCamelList(res.items).map((r: any) => ({
-      ...r,
-      trigger: r.triggerType || r.trigger || 'manual',
-      startedAt: r.createdAt || r.startedAt,
-      finishedAt: r.updatedAt || r.finishedAt,
-    }));
+    return (res.items as Record<string, unknown>[]).map(normalizeRun);
   },
 
   createTestRun: async (data: Record<string, unknown>) => {
@@ -152,7 +199,7 @@ export const api = {
         environment: data.environment,
       }),
     });
-    return res.item;
+    return normalizeRun(res.item);
   },
 
   updateTestRun: async (id: string, fields: Record<string, unknown>) => {
@@ -160,22 +207,30 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ id, ...fields }),
     });
-    return res.item;
+    return normalizeRun(res.item);
   },
 
-  getTestResults: async (runId?: string, caseId?: string) => {
-    const res = await requestJson(`${API_BASE}?action=result_list${runId ? `&runId=${runId}` : ""}${caseId ? `&caseId=${caseId}` : ""}`);
-    return toCamelList(res.items).map((r: any) => ({
-      ...r,
-      actualResult: r.description || r.actualResult || '',
-      errorLog: r.errorLog || '',
-      durationMs: r.durationMs ?? 0,
-      executedAt: r.createdAt || r.executedAt,
-      executedBy: r.executedBy || '',
-    }));
+  getTestResultsPage,
+
+  getTestResults: async (runId?: string, caseId?: string, projectId?: string) => {
+    const items: TestResult[] = [];
+    let offset = 0;
+    for (;;) {
+      const page = await getTestResultsPage({ runId, caseId, projectId, offset, pageSize: 100 });
+      items.push(...page.items);
+      if (page.nextOffset == null) return items;
+      if (!Number.isInteger(page.nextOffset) || page.nextOffset <= offset) {
+        throw new Error('Invalid result pagination response');
+      }
+      offset = page.nextOffset;
+    }
   },
 
   createTestResult: async (data: Record<string, unknown>) => {
+    const errorLog = data.errorLog ?? '';
+    if (typeof errorLog !== 'string' || Array.from(errorLog).length > MAX_ERROR_LOG_LENGTH) {
+      throw new Error(`错误日志最多允许 ${MAX_ERROR_LOG_LENGTH} 个字符，请缩短后重试。`);
+    }
     const res = await requestJson(`${API_BASE}?action=result_create`, {
       method: "POST",
       body: JSON.stringify({
@@ -183,10 +238,11 @@ export const api = {
         caseId: data.caseId,
         status: data.status,
         description: data.actualResult || data.description,
+        errorLog,
         durationMs: data.durationMs || 0,
       }),
     });
-    return res.item;
+    return normalizeResult(res.item);
   },
 
   getDefects: async (projectId?: string) => {
@@ -280,7 +336,8 @@ export const api = {
   },
 
   getDashboard: async (projectId?: string) => {
-    return requestJson(`${API_BASE}?action=dashboard_stats${projectId ? `&projectId=${projectId}` : ""}`);
+    const stats = await requestJson(`${API_BASE}?action=dashboard_stats${projectId ? `&projectId=${projectId}` : ""}`);
+    return { ...stats, recentResults: (stats.recentResults || []).map(normalizeResult) };
   },
 
   health: async () => requestJson(`${API_BASE}?action=health`),
